@@ -223,6 +223,29 @@ body.hostwin { background: linear-gradient(160deg, #0d1015, #141922); }
 .hw-item .t { float: right; font-size: 11px; color: var(--muted); margin-left: 8px; }
 .hw-item.wan { border-left-color: var(--warn); }
 .hw-item.lan { border-left-color: var(--ok); }
+.hw-sys {
+  font-size: 12px; color: var(--muted); text-align: center;
+  padding: 3px 0; animation: flyin .25s ease-out;
+}
+/* 主机窗里观众名字可点，弹出踢人/禁言菜单 */
+body.hostwin .peer { cursor: pointer; user-select: none; }
+body.hostwin .peer:hover { border-color: var(--accent2); color: #fff; }
+body.hostwin .peer.muted { border-style: dashed; opacity: .78; }
+.mod-menu {
+  position: fixed; z-index: 9999;
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 6px; border-radius: 9px;
+  background: #1b212c; border: 1px solid var(--line);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .55);
+}
+.mod-btn {
+  font: inherit; font-size: 13px; text-align: left;
+  padding: 7px 14px; border-radius: 6px; cursor: pointer;
+  background: var(--panel2); border: 1px solid var(--line); color: var(--fg);
+}
+.mod-btn:hover { border-color: var(--accent2); }
+.mod-btn.danger { color: #ff8080; }
+.mod-btn.danger:hover { border-color: #ff5d5d; background: rgba(255, 93, 93, .12); }
 .hw-foot { font-size: 11.5px; color: var(--muted); display: flex; align-items: center; gap: 10px; }
 .bar { flex: 1; height: 6px; background: var(--panel2); border-radius: 4px; overflow: hidden; }
 .bar > i { display: block; height: 100%; background: var(--ok); width: 0; transition: width .5s, background .5s; }

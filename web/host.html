@@ -52,6 +52,49 @@ function render(m) {
   while ($('list').children.length > 400) $('list').removeChild($('list').firstChild);
 }
 
+function sysLine(text) {
+  const d = document.createElement('div');
+  d.className = 'hw-sys';
+  d.textContent = text;
+  $('list').appendChild(d);
+  $('list').scrollTop = $('list').scrollHeight;
+}
+
+/* ---------------- 点观众名字 -> 踢出 / 禁言 ---------------- */
+let menuEl = null, currentUsers = [];
+function closeMenu() { if (menuEl) { menuEl.remove(); menuEl = null; } }
+document.addEventListener('click', (e) => {
+  if (menuEl && !menuEl.contains(e.target)) closeMenu();
+});
+
+function sendMod(action, name) {
+  if (!ws || ws.readyState !== 1) { sysLine('未连接，操作没发出去'); return; }
+  ws.send(JSON.stringify({ t: 'mod', action, name }));
+}
+
+function openMenu(chip, u) {
+  closeMenu();
+  const r = chip.getBoundingClientRect();
+  const m = document.createElement('div');
+  m.className = 'mod-menu';
+  const mk = (label, cls, fn) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'mod-btn' + (cls ? ' ' + cls : '');
+    b.textContent = label;
+    b.onclick = (ev) => { ev.stopPropagation(); closeMenu(); fn(); };
+    m.appendChild(b);
+  };
+  mk(u.muted ? '解除禁言' : '禁言', '', () => sendMod(u.muted ? 'unmute' : 'mute', u.name));
+  mk('踢出', 'danger', () => {
+    if (confirm('把「' + u.name + '」移出观看？\n（对方会立刻断开，需要名字才能重新进来）')) sendMod('kick', u.name);
+  });
+  m.style.left = Math.max(4, Math.min(r.left, window.innerWidth - 140)) + 'px';
+  m.style.top = Math.min(r.bottom + 4, window.innerHeight - 90) + 'px';
+  document.body.appendChild(m);
+  menuEl = m;
+}
+
 /* 延迟补偿: 观众看到画面的时间比实时晚 lagMs, 把消息也推迟同样时间渲染,
    这样"你讲的那一屏"和"你看到的评论"才是对齐的 */
 function enqueue(m) {
@@ -90,10 +133,24 @@ function connect() {
       const bar = $('hwOnline');
       if (bar) {
         const list = (m.detail && m.detail.length) ? m.detail : (m.users || []).map(n => ({ name: n, via: 'wan' }));
+        currentUsers = list;
+        closeMenu();
         bar.innerHTML = list.length
-          ? list.map(u => `<span class="peer ${u.via === 'lan' ? 'lan' : 'wan'}" title="${u.via === 'lan' ? '校园网直连' : '隧道'}">${esc(u.name)}</span>`).join('')
+          ? list.map(u => `<span class="peer ${u.via === 'lan' ? 'lan' : 'wan'}${u.muted ? ' muted' : ''}" data-name="${esc(u.name)}" title="${u.via === 'lan' ? '校园网直连' : '隧道'}${u.muted ? ' · 已禁言' : ''} · 点击可踢人或禁言">${esc(u.name)}${u.muted ? ' 🔇' : ''}</span>`).join('')
           : '<span class="tip">暂时没有观众</span>';
+        Array.prototype.forEach.call(bar.querySelectorAll('.peer'), (chip) => {
+          chip.onclick = (ev) => {
+            ev.stopPropagation();
+            const nm = chip.getAttribute('data-name');
+            const u = currentUsers.filter(x => x.name === nm)[0];
+            if (u) openMenu(chip, u); else closeMenu();
+          };
+        });
       }
+    } else if (m.t === 'sys') {
+      sysLine(m.text);
+    } else if (m.t === 'cleared') {
+      $('list').innerHTML = '';
     } else if (m.t === 'stats') {
       quotaBytes = m.quotaBytes || quotaBytes;
       const pct = Math.min(1, m.percent || 0);

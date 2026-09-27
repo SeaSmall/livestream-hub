@@ -187,6 +187,13 @@ function statsSnapshot() {
 //   1) 服务启动时（除非 config.json 里把 clearChatOnStart 设成 false）
 //   2) 推流从离线变成在线时 —— 服务一直开着也能做到"每开播一次清一次"
 let history = [];
+
+// 禁言名单：内存态，服务重启即清空（每次开播都是干净的）
+const muted = new Set();
+function sysNote(text) {
+  try { broadcast({ t: 'sys', text, ts: Date.now() }); } catch (_) { /* wss 还没起来 */ }
+}
+
 function appendChat(msg) {
   history.push(msg);
   if (history.length > HISTORY_KEEP) history.splice(0, history.length - HISTORY_KEEP);
@@ -575,7 +582,8 @@ function onlineUsers() {
     map.set(c.session.name, {
       name: c.session.name,
       via: c.session.via || 'wan',
-      since: c.session.joinedAt || 0
+      since: c.session.joinedAt || 0,
+      muted: muted.has(c.session.name)
     });
   }
   return [...map.values()].sort((a, b) => a.since - b.since);
@@ -634,8 +642,47 @@ wss.on('connection', (ws) => {
       return;
     }
 
+    if (m.t === 'mod') {
+      if (!ws.isHost) return;                                    // 只有主人能操作
+      const action = String(m.action || '');
+      const target = String(m.name || '');
+      if (!target || target === 'HOST') return;
+
+      if (action === 'kick') {
+        let n = 0;
+        for (const c of wss.clients) {
+          if (c.isHost || !c.session || c.session.name !== target) continue;
+          try { c.send(JSON.stringify({ t: 'kicked', reason: '你已被主人移出观看' })); } catch (_) {}
+          try { c.terminate(); } catch (_) {}
+          if (c.token) sessions.delete(c.token);
+          n++;
+        }
+        muted.delete(target);
+        saveSessions();
+        sysNote(n ? `「${target}」已被移出` : `「${target}」已经不在线了`);
+        log(`[管理] 踢出 "${target}"，断开 ${n} 个连接`);
+      } else if (action === 'mute' || action === 'unmute') {
+        const on = (action === 'mute');
+        if (on) muted.add(target); else muted.delete(target);
+        for (const c of wss.clients) {
+          if (c.isHost || !c.session || c.session.name !== target) continue;
+          try { c.send(JSON.stringify({ t: 'muted', muted: on })); } catch (_) {}
+        }
+        sysNote(on ? `「${target}」已被禁言` : `「${target}」已被解除禁言`);
+        log(`[管理] ${on ? '禁言' : '解除禁言'} "${target}"`);
+      } else {
+        return;
+      }
+      pushPresence();
+      return;
+    }
+
     if (m.t === 'msg') {
       if (ws.isHost) return;                                     // 主机端只读
+      if (muted.has(s.name)) {
+        ws.send(JSON.stringify({ t: 'warn', text: '你被禁言了，暂时不能发言' }));
+        return;
+      }
       const text = String(m.text || '').replace(/\s+$/, '').trim();
       if (!text) return;
       if (text.length > MAX_MSG_LEN) return;

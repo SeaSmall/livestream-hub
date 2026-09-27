@@ -59,6 +59,13 @@ function setBadge(kind, text) {
   b.className = 'badge ' + (kind === 'lan' ? 'lan' : kind === 'wan' ? 'wan' : 'detecting');
   b.textContent = text;
 }
+// showMsg 用的是 innerHTML（消息里会带 <code> 之类的标签），
+// 所以任何来自服务端/用户的动态内容都必须先转义，否则会 XSS 或直接报错。
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
 function showMsg(type, text) {
   const m = $('msgBox');
   m.className = 'msg-box show ' + type;

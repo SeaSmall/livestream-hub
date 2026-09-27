@@ -82,7 +82,7 @@ const route = JSON.parse(localStorage.getItem(LS_ROUTE) || 'null') || { kind: 'w
 const onLan = location.origin === route.url;
 
 const PATHS = { lan: 'live', wan: 'wan' };
-let hls = null, pc = null, ws = null, currentMode = '', chatStopped = false;
+let hls = null, pc = null, ws = null, currentMode = '', chatStopped = false, kickedByMod = false;
 
 /* ---------------- 状态显示 ---------------- */
 function setStatus(state, text) {
@@ -303,6 +303,24 @@ function addSys(text) {
 }
 function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 
+/* 被禁言：输入框锁上，按钮变灰，并给出明确原因（不要含糊的"发送失败"） */
+let iAmMuted = false;
+function setMuted(on) {
+  iAmMuted = !!on;
+  const inputs = [['msgInput', '说点什么…（回车发送）'], ['fsInput', '发条弹幕…']];
+  inputs.forEach(([id, ph]) => {
+    const el = $(id);
+    if (!el) return;
+    el.disabled = iAmMuted;
+    el.placeholder = iAmMuted ? '你被禁言了' : ph;
+  });
+  ['sendBtn', 'fsSendBtn'].forEach((id) => {
+    const b = $(id);
+    if (b) b.disabled = iAmMuted;
+  });
+  addSys(iAmMuted ? '🔇 你已被主人禁言，暂时不能发言' : '🔊 禁言已解除，可以正常发言了');
+}
+
 function connectChat() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/chat?token=${encodeURIComponent(token)}`);
@@ -321,14 +339,19 @@ function connectChat() {
       if (bar) {
         const list = (m.detail && m.detail.length) ? m.detail : (m.users || []).map(n => ({ name: n, via: 'wan' }));
         bar.innerHTML = list.map(u =>
-          `<span class="peer ${u.via === 'lan' ? 'lan' : 'wan'}" title="${u.via === 'lan' ? '校园网直连' : '隧道'}">${esc(u.name)}</span>`
+          `<span class="peer ${u.via === 'lan' ? 'lan' : 'wan'}${u.muted ? ' muted' : ''}" title="${u.via === 'lan' ? '校园网直连' : '隧道'}${u.muted ? ' · 已禁言' : ''}">${esc(u.name)}${u.muted ? ' 🔇' : ''}</span>`
         ).join('');
         bar.style.display = list.length ? '' : 'none';
       }
     } else if (m.t === 'kicked') {
       chatStopped = true;
+      kickedByMod = true;
       addSys('⚠ ' + (m.reason || '连接被服务端断开'));
       $('onlineTip').textContent = '已被断开';
+    } else if (m.t === 'sys') {
+      addSys(m.text);
+    } else if (m.t === 'muted') {
+      setMuted(!!m.muted);
     } else if (m.t === 'warn') {
       addSys(m.text);
     } else if (m.t === 'cleared') {
@@ -341,7 +364,8 @@ function connectChat() {
     }
   };
   ws.onclose = () => {
-    if (chatStopped) { $('onlineTip').textContent = '已断开'; return; }
+    // 被主人踢掉时 onclose 会紧跟着 kicked 消息到，别把更有信息量的提示覆盖掉
+    if (chatStopped) { $('onlineTip').textContent = kickedByMod ? '已被断开' : '已断开'; return; }
     $('onlineTip').textContent = '连接断开，重连中…';
     setTimeout(connectChat, 3000);
   };
@@ -354,6 +378,7 @@ function send(fromEl) {
   if (!el) return;
   const text = el.value.trim();
   if (!text) return;
+  if (iAmMuted) { addSys('你被禁言了，暂时不能发言'); return; }
   if (!ws || ws.readyState !== 1) { addSys('聊天还没连上，稍等一下再发'); return; }
   ws.send(JSON.stringify({ t: 'msg', text }));
   el.value = '';
