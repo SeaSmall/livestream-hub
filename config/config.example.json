@@ -28,5 +28,6 @@
   },
   "publicUrl": "",
   "clearChatOnStart": true,
-  "clearSessionsOnStart": true
+  "clearSessionsOnStart": true,
+  "hlsSecret": ""
 }

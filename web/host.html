@@ -17,6 +17,8 @@
     <span id="clock"></span>
   </div>
 
+  <div class="hw-online" id="hwOnline"><span class="tip">等待观众…</span></div>
+
   <div class="hw-list" id="list"></div>
 
   <div class="hw-foot">
@@ -85,6 +87,13 @@ function connect() {
       enqueue(m);
     } else if (m.t === 'presence') {
       $('online').textContent = m.online + ' 人在线';
+      const bar = $('hwOnline');
+      if (bar) {
+        const list = (m.detail && m.detail.length) ? m.detail : (m.users || []).map(n => ({ name: n, via: 'wan' }));
+        bar.innerHTML = list.length
+          ? list.map(u => `<span class="peer ${u.via === 'lan' ? 'lan' : 'wan'}" title="${u.via === 'lan' ? '校园网直连' : '隧道'}">${esc(u.name)}</span>`).join('')
+          : '<span class="tip">暂时没有观众</span>';
+      }
     } else if (m.t === 'stats') {
       quotaBytes = m.quotaBytes || quotaBytes;
       const pct = Math.min(1, m.percent || 0);

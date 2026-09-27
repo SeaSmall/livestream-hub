@@ -304,6 +304,16 @@ function proxyToMediaMTX(req, res, remotePath, upstreamPort, counter, pathName, 
   const host = C('mediamtxHost', '127.0.0.1');
   const headers = Object.assign({}, req.headers);
   headers.host = `${host}:${upstreamPort}`;
+
+  // 配了 hlsCDNSecret 就直接以「CDN」身份请求 MediaMTX，完全绕开它的防热链 cookie。
+  // 这比在代理里维护 per-client 的 cookie 分桶可靠得多：走 TCP 隧道时所有观众在
+  // 服务端看都是 127.0.0.1，只能靠 UA 区分，而 iOS 原生 HLS 的播放列表请求和
+  // 分片请求 UA 未必一致，分桶一分错分片就 401，表现就是「一直缓冲不出画面」。
+  const hlsSecret = C('hlsSecret', '');
+  if (hlsSecret && upstreamPort === C('hlsPort', 8888)) {
+    headers.authorization = `Bearer ${hlsSecret}`;
+  }
+
   const jar = jarGet(req);
   if (jar) headers.cookie = jar;
 
@@ -394,6 +404,11 @@ const server = http.createServer(async (req, res) => {
     if (!nameAllowed(name)) {
       log(`拒绝进入: "${name}" (${ip}) 不在白名单`);
       return json(res, 403, { ok: false, error: '名字错误：名单里没有这个名字，请填写你的真实姓名' });
+    }
+    // 同名唯一: 已经有人以这个名字在线，就不让第二个人再进
+    if (nameInUse(name)) {
+      log(`拒绝进入: "${name}" 已在别处在线`);
+      return json(res, 409, { ok: false, error: '这个名字已经在线了。如果你在别的窗口/设备上开着，请先关掉那边；如果不是你本人，请联系主讲人。' });
     }
     // 走 TCP 隧道时, 所有外网观众的来源 IP 在服务端看都是 127.0.0.1,
     // 没法用 IP 判断内外网 —— 以入口页自己探测出来的线路为准。
@@ -520,14 +535,48 @@ function broadcast(obj) {
   const s = JSON.stringify(obj);
   for (const c of wss.clients) { if (c.readyState === 1) c.send(s); }
 }
+
+// 同名唯一：是否已经有一个「活着的」连接用着这个名字
+function nameInUse(name, exceptWs) {
+  for (const c of wss.clients) {
+    if (c === exceptWs) continue;
+    if (c.isHost) continue;
+    if (c.readyState !== 1) continue;
+    if (c.session && c.session.name === name) return true;
+  }
+  return false;
+}
+
+// 当前在线的观众（按进入时间排序，便于主人在消息窗里认人）
+function onlineUsers() {
+  const map = new Map();
+  for (const c of wss.clients) {
+    if (c.isHost || c.readyState !== 1 || !c.session) continue;
+    map.set(c.session.name, {
+      name: c.session.name,
+      via: c.session.via || 'wan',
+      since: c.session.joinedAt || 0
+    });
+  }
+  return [...map.values()].sort((a, b) => a.since - b.since);
+}
+
 function pushPresence() {
-  const users = [];
-  for (const c of wss.clients) if (!c.isHost && c.session) users.push(c.session.name);
-  broadcast({ t: 'presence', online: users.length, users: [...new Set(users)] });
+  const users = onlineUsers();
+  broadcast({ t: 'presence', online: users.length, users: users.map(u => u.name), detail: users });
 }
 
 wss.on('connection', (ws) => {
   const s = ws.session;
+
+  // 同名唯一：两个人抢同一个名字时，后到的直接断开
+  if (!ws.isHost && nameInUse(s.name, ws)) {
+    log(`同名冲突，断开后来的连接: ${s.name}`);
+    try { ws.send(JSON.stringify({ t: 'kicked', reason: '这个名字已经在别处在线了' })); } catch (_) {}
+    setTimeout(() => { try { ws.close(4009, 'name in use'); } catch (_) {} }, 100);
+    return;
+  }
+
   ws.send(JSON.stringify({
     t: 'hello',
     name: s.name,

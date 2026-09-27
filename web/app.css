@@ -163,6 +163,26 @@ button.ghost { background: transparent; font-weight: 500; padding: 8px 12px; fon
   display: flex; align-items: center; gap: 8px;
 }
 .chat-list { flex: 1; overflow-y: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
+
+/* 在线名单 */
+.online-bar {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(255, 255, 255, .02);
+  max-height: 92px; overflow-y: auto;
+}
+.peer {
+  font-size: 12px;
+  padding: 2px 9px;
+  border-radius: 20px;
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  color: var(--fg);
+  white-space: nowrap;
+}
+.peer.lan { border-color: rgba(62, 207, 142, .5); color: var(--ok); }
+.peer.wan { border-color: rgba(255, 176, 32, .45); color: var(--warn); }
 .chat-item { font-size: 14px; line-height: 1.55; word-break: break-word; }
 .chat-item .who { font-weight: 650; color: var(--accent2); margin-right: 6px; }
 .chat-item.mine { opacity: .78; }
@@ -182,6 +202,13 @@ body.hostwin { background: linear-gradient(160deg, #0d1015, #141922); }
   padding-bottom: 8px; border-bottom: 1px solid var(--line);
 }
 .hw-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 9px; padding-right: 4px; }
+.hw-online {
+  display: flex; flex-wrap: wrap; gap: 5px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+  max-height: 76px; overflow-y: auto;
+  flex: none;
+}
 .hw-item {
   background: rgba(255, 255, 255, .035);
   border-left: 3px solid var(--accent);

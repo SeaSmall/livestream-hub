@@ -132,13 +132,23 @@ Say '生成 MediaMTX 配置'
 $tpl = Join-Path $root 'config\mediamtx.yml.template'
 $mtxYml = Join-Path $mtxDir 'mediamtx.yml'
 if (-not (Test-Path $tpl)) { Fail "缺少模板 $tpl"; exit 1 }
+
+# HLS 的 CDN 密钥：让前置代理能跳过 MediaMTX 的防热链 cookie 校验。
+# 不能省 —— 没有它代理只能自己维护 per-client 的 cookie 分桶，而走 TCP 隧道时
+# 所有观众在服务端看都是 127.0.0.1，只能靠 UA 区分；iOS 原生 HLS 的播放列表
+# 请求和分片请求 UA 未必一致，分桶一分错分片就 401，表现就是
+# 「一直缓冲但出不来画面」。
+$hlsSecret = -join ((48..57) + (97..122) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
+
 if ((Test-Path $mtxYml) -and -not $Force) {
     Ok 'mediamtx.yml 已存在，保留（要覆盖请加 -Force）'
 } else {
     $t = Get-Content $tpl -Raw -Encoding UTF8
-    $t = $t.Replace('{{ROOT}}', $root.Replace('\', '/')).Replace('{{FFMPEG}}', $ffmpegFwd)
+    $t = $t.Replace('{{ROOT}}', $root.Replace('\', '/'))
+    $t = $t.Replace('{{FFMPEG}}', $ffmpegFwd)
+    $t = $t.Replace('{{HLSSECRET}}', $hlsSecret)
     [System.IO.File]::WriteAllText($mtxYml, $t, (New-Object System.Text.UTF8Encoding($false)))
-    Ok "已生成 $mtxYml"
+    Ok "已生成 $mtxYml（含随机 HLS 密钥）"
 }
 
 # ---------------------------------------------------------------- 4. 生成 config.json / names.txt
@@ -153,8 +163,11 @@ if ((Test-Path $cfgPath) -and -not $Force) {
     # 生成每台机器独立的 hostKey（主机消息窗用它鉴权，不能是固定值）
     $key = -join ((48..57) + (97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
     $cfg.hostKey = $key
+    # 与 mediamtx.yml 里的 hlsCDNSecret 保持一致
+    if ($cfg.PSObject.Properties.Name -contains 'hlsSecret') { $cfg.hlsSecret = $hlsSecret }
+    else { $cfg | Add-Member -NotePropertyName hlsSecret -NotePropertyValue $hlsSecret -Force }
     $cfg | ConvertTo-Json -Depth 8 | Set-Content $cfgPath -Encoding UTF8
-    Ok "已生成 data\config.json（hostKey 随机生成）"
+    Ok '已生成 data\config.json（hostKey 与 HLS 密钥均随机生成）'
 }
 
 $namesPath = Join-Path $dataDir 'names.txt'

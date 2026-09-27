@@ -51,6 +51,10 @@ hlsSegmentDuration: 1s
 hlsPartDuration: 200ms
 hlsSegmentMaxSize: 20M
 hlsMuxerCloseAfter: 60s
+# 给前置代理用的 CDN 密钥：请求带上 `Authorization: Bearer <secret>` 时，
+# MediaMTX 会跳过它的防热链 cookie 校验。由 setup.ps1 随机生成，
+# 并与 data/config.json 里的 hlsSecret 保持一致。
+hlsCDNSecret: "{{HLSSECRET}}"
 
 ###############################################
 # WebRTC：局域网观众走这条（UDP 8189 直连，延迟毫秒级）

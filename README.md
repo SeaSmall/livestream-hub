@@ -4,7 +4,9 @@
 
 - 🎯 **同一个链接，自动分两条线路**：同一局域网的人走**直连**看原画（1080p60、毫秒级延迟、不耗流量），外面的人走**中转**看压缩流（720p、省流量）
 - 🔒 **真名门禁**：观众必须输入名单里的真名才能进，否则直接被挡在门外
+- 👤 **同名唯一**：同一个名字只允许一个人在线，防止两个人共用名字混进来
 - 💬 **多用户聊天**：观众之间互相可见、可回复；主播端有一个**右下角始终置顶**的只读消息窗
+- 📋 **在线名单**：观众和主播都能看到当前在线的都有谁、各自走的是直连还是隧道
 - 📱 **手机全屏**：全屏后底部是仿 B 站的输入条，消息以弹幕形式飘过
 - 🧹 **聊天不残留**：每次开播自动清空聊天（服务重启、或推流重新开始都会触发）
 - 📉 **流量可控**：中转流量按需产生（没人在线就零开销），静止画面自动降码率，实时统计并带额度告警
@@ -263,6 +265,34 @@ Invoke-RestMethod "http://127.0.0.1:$($cfg.port)/api/clear-chat?key=$($cfg.hostK
 
 OBS 没用 WHIP 推流。改成 WHIP（见 [OBS 设置](#obs-设置关键)），或者把
 `data\config.json` 的 `streamPaths.lan` 改成 `"lanav"`。
+</details>
+
+<details>
+<summary><b>手机一直转圈 / 一直缓冲但出不来画面</b></summary>
+
+最常见的原因是 **MediaMTX 的 HLS 防热链 cookie 校验**，在 iOS 上尤其容易踩。
+
+MediaMTX 会给 HLS 下发一个带 `Secure` 的会话 cookie——纯 HTTP 下浏览器存不住；
+前置代理只能自己维护一份 cookie 分桶，而走 TCP 隧道时所有观众在服务端看都是 `127.0.0.1`，
+只能靠 User-Agent 区分。**iOS 原生 HLS 播放列表请求和分片请求的 UA 未必一致**，
+分桶一分错，分片就 401，表现就是画面一直出不来。
+
+正确做法是**启用 MediaMTX 的 CDN 密钥**：`setup.ps1` 会自动生成 32 位随机密钥，
+同时写进 `mediamtx.yml` 的 `hlsCDNSecret` 和 `data\config.json` 的 `hlsSecret`。
+之后代理对每个 HLS 请求都带 `Authorization: Bearer <secret>`，MediaMTX 直接跳过 cookie 校验。
+
+> 如果你是手动部署的、没跑 `setup.ps1`，一定要自己补上这两处，否则手机上很可能播不出来。
+> 验证方法：`Get-Content logs\mediamtx.log | Select-String 'created \(CDN\)'`，出现这行就对了。
+</details>
+
+<details>
+<summary><b>聊天窗口显示"这个名字已经在线了"</b></summary>
+
+这是**同名唯一**在起作用：同一个名字只允许一个连接。
+
+- 你自己在另一个窗口/设备开着 → 关掉那边再进
+- 不是你本人 → 说明有人冒用了这个名字，请联系主讲人核对
+- 你的旧标签页卡死了导致占用还在 → 等几秒让 WebSocket 超时断开，或者重启一次服务
 </details>
 
 <details>
