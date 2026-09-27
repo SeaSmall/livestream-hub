@@ -27,5 +27,6 @@
     "wan": "hls"
   },
   "publicUrl": "",
-  "clearChatOnStart": true
+  "clearChatOnStart": true,
+  "clearSessionsOnStart": true
 }

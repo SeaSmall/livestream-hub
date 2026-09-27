@@ -83,19 +83,22 @@ async function detectRoute(force) {
   const cache = JSON.parse(localStorage.getItem(LS_ROUTE) || 'null');
   const now = Date.now();
 
-  // 命中缓存
-  if (!force && cache && now - cache.ts < 5 * 60 * 1000) {
-    if (cache.url && cache.url !== cur) {
-      setBadge(cache.kind, cache.kind === 'lan' ? '校园网直连' : '校外隧道');
-      location.replace(cache.url + '/');
-      return null;
-    }
-    if (cache.url === cur) {
+  // 命中缓存 —— 只信任"当前就在这条线路上"这一种情况。
+  // 绝不因为缓存里存着另一个地址就自动跳过去：那个地址很可能此刻根本不可达
+  //（手机不在校园网时被跳到内网 IP，页面直接打不开 —— 这是踩过的坑）。
+  if (!force && cache && now - cache.ts < 5 * 60 * 1000 && cache.url === cur) {
+    if (cache.kind === 'lan') {
       routeInfo = { kind: 'lan', url: cur, detail: '（已直连）' };
       setBadge('lan', '校园网直连');
       $('routeDetail').textContent = '正在使用校园网内网直连，画质与延迟最优';
-      return routeInfo;
+    } else {
+      routeInfo = { kind: 'wan', url: cur, detail: '（隧道）' };
+      setBadge('wan', '校外隧道');
+      $('routeDetail').textContent = '使用隧道线路（720P 压缩）。如果你是校园网内用户，点下面的按钮切换直连';
     }
+    const t2 = $('switchTitle');
+    if (t2) t2.textContent = cache.kind === 'lan' ? '当前走校园网直连' : '当前走隧道';
+    return routeInfo;
   }
 
   // 拉取候选内网地址
@@ -160,15 +163,16 @@ async function manualLan() {
     }
   }
 
-  // 探测被浏览器策略拦掉了 —— 但"点链接跳转"不受该策略限制，改在新标签页打开
+  // 探测被浏览器策略拦掉了 —— 但"点链接跳转"不受该策略限制，改在新标签页打开。
+  // 关键：这里绝不能把内网地址写进本页的线路缓存。否则下次打开发起页会"自动跳转"
+  // 到一个可能不可达的内网 IP（手机不在校园网时页面直接打不开）。
   const url = urls[0];
-  localStorage.setItem(LS_ROUTE, JSON.stringify({ url, kind: 'lan', ts: Date.now() }));
   const w = window.open(url + '/', '_blank');
   if (w) {
     showMsg('info',
       '已在新标签页打开直连地址 <code>' + url + '</code><br>' +
-      '<b>能显示直播画面</b> → 直连成功，以后打开本页会自动走直连；<br>' +
-      '<b>打不开</b> → 说明你确实不在校园网内，关掉那个标签页，继续用当前页面即可。');
+      '<b>能看到直播画面</b> → 你确实在校园网内，建议把这个地址收藏起来，以后直接用它；<br>' +
+      '<b>打不开</b> → 你不在校园网内，关掉那个标签页，继续用当前页面看就行。');
   } else {
     showMsg('err', '浏览器拦截了新标签页。请手动在地址栏打开：<code>' + url + '</code>');
   }

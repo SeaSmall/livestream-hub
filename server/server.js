@@ -405,8 +405,15 @@ const server = http.createServer(async (req, res) => {
 
   // ---- 会话查询 ----
   if (p === '/api/me') {
-    const s = getSession(u.searchParams.get('token') || '');
+    const t = u.searchParams.get('token') || '';
+    const s = getSession(t);
     if (!s) return json(res, 401, { ok: false, error: '会话已失效，请重新进入' });
+    // 名字必须"此刻"仍在白名单里。否则改了名单之后，旧 token 还能一直免检进入。
+    if (!nameAllowed(s.name)) {
+      sessions.delete(t); saveSessions();
+      log(`会话作废: "${s.name}" 已不在白名单`);
+      return json(res, 401, { ok: false, error: '你的名字已不在名单里，请联系主讲人核对' });
+    }
     return json(res, 200, { ok: true, name: s.name, via: s.via });
   }
 
@@ -494,7 +501,9 @@ server.on('upgrade', (req, socket, head) => {
   }
 
   const session = getSession(token);
-  if (!session) {
+  // 同样要复查白名单: 名单改过之后旧 token 不能继续用
+  if (!session || !nameAllowed(session.name)) {
+    if (session) { sessions.delete(token); saveSessions(); log(`会话作废(WS): "${session.name}" 不在白名单`); }
     socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
     socket.destroy();
     return;
@@ -586,6 +595,12 @@ setInterval(() => {
 reloadConfig(true);
 reloadNames(true);
 initHistory();
+// 每次开播都让人重新报一次名字，否则旧 token 会绕开白名单
+if (C('clearSessionsOnStart', true) && sessions.size) {
+  const n = sessions.size;
+  sessions.clear(); saveSessions();
+  log(`已清空 ${n} 个旧会话（clearSessionsOnStart = true），观众需重新验证名字`);
+}
 // 每 5 秒看一次推流状态，开播时自动清空聊天
 setInterval(watchStreamState, 5000);
 watchStreamState();
