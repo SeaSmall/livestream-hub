@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>进入直播</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div class="wrap">
+
+  <div class="card">
+    <h1>进入直播</h1>
+    <p class="sub">
+      当前线路：<span id="routeBadge" class="badge detecting">正在检测…</span>
+      <span id="routeDetail" class="tip"></span>
+    </p>
+
+    <div id="nameStep">
+      <label for="nameInput">请输入你的真实姓名（用于进入白名单）</label>
+      <input type="text" id="nameInput" placeholder="例如：张三" autocomplete="off" maxlength="20" spellcheck="false">
+      <button class="primary wide" id="joinBtn">进入直播</button>
+      <div class="tip" style="margin-top:12px">
+        不是你的名字就进不来 —— 名单由主讲人维护，填不上请直接联系主讲人核对。
+      </div>
+    </div>
+
+    <div id="msgBox" class="msg-box"></div>
+  </div>
+
+  <div class="card" id="switchCard" style="display:none">
+    <h2>线路：<span id="switchTitle">检测中…</span></h2>
+    <p class="tip" style="margin-bottom:12px" id="switchHint">
+      浏览器出于安全策略（本地网络访问管控），<b>禁止公网页面自动探测内网地址</b>，
+      所以需要你点一下确认。点一次就记住了，以后自动走这条线。
+    </p>
+    <div class="row" style="flex-wrap:wrap">
+      <button class="primary" id="forceLan">我在校园网内，切换到高清直连</button>
+      <button class="ghost" id="forceWan">我在校外，用隧道</button>
+      <button class="ghost" id="redetect">重新检测</button>
+    </div>
+    <div class="tip" id="lanList" style="margin-top:12px"></div>
+  </div>
+
+</div>
+
+<script>
+'use strict';
+const LS_ROUTE = 'ls_route_v1';
+const LS_TOKEN = 'ls_token_v1';
+const LS_NAME  = 'ls_name_v1';
+
+let routeInfo = { kind: 'wan', url: null, detail: '' };
+
+const $ = (id) => document.getElementById(id);
+
+function setBadge(kind, text) {
+  const b = $('routeBadge');
+  b.className = 'badge ' + (kind === 'lan' ? 'lan' : kind === 'wan' ? 'wan' : 'detecting');
+  b.textContent = text;
+}
+function showMsg(type, text) {
+  const m = $('msgBox');
+  m.className = 'msg-box show ' + type;
+  m.innerHTML = text;
+}
+
+/* ---------- 局域网探测 ---------- */
+async function probe(url, timeoutMs) {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+    await fetch(url + '/probe?_=' + Date.now(), { mode: 'no-cors', signal: ctrl.signal, cache: 'no-store' });
+    clearTimeout(t);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function detectRoute(force) {
+  const cur = location.origin;
+  const cache = JSON.parse(localStorage.getItem(LS_ROUTE) || 'null');
+  const now = Date.now();
+
+  // 命中缓存
+  if (!force && cache && now - cache.ts < 5 * 60 * 1000) {
+    if (cache.url && cache.url !== cur) {
+      setBadge(cache.kind, cache.kind === 'lan' ? '校园网直连' : '校外隧道');
+      location.replace(cache.url + '/');
+      return null;
+    }
+    if (cache.url === cur) {
+      routeInfo = { kind: 'lan', url: cur, detail: '（已直连）' };
+      setBadge('lan', '校园网直连');
+      $('routeDetail').textContent = '正在使用校园网内网直连，画质与延迟最优';
+      return routeInfo;
+    }
+  }
+
+  // 拉取候选内网地址
+  let cands = [];
+  try {
+    const r = await fetch('/routes.json?_=' + Date.now(), { cache: 'no-store' });
+    const j = await r.json();
+    cands = (j.lan || []).map(x => x.url);
+  } catch (_) { /* 忽略 */ }
+
+  const detail = [];
+  for (const url of cands) {
+    if (url === cur) {
+      routeInfo = { kind: 'lan', url: cur, detail: '（已直连）' };
+      setBadge('lan', '校园网直连');
+      $('routeDetail').textContent = '正在使用校园网内网直连，画质与延迟最优';
+      localStorage.setItem(LS_ROUTE, JSON.stringify({ url: cur, kind: 'lan', ts: now }));
+      return routeInfo;
+    }
+  }
+
+  // 并发探测所有候选，取最快成功的
+  const results = await Promise.all(cands.map(async (url) => ({ url, ok: await probe(url, 900) })));
+  const hit = results.find(r => r.ok);
+  if (hit) {
+    localStorage.setItem(LS_ROUTE, JSON.stringify({ url: hit.url, kind: 'lan', ts: now }));
+    setBadge('lan', '校园网直连');
+    $('routeDetail').textContent = '检测到你在校园网内，正在切换到直连线路…';
+    location.replace(hit.url + '/');
+    return null;
+  }
+
+  // 全部失败 -> 走隧道
+  routeInfo = { kind: 'wan', url: cur, detail: '（隧道）' };
+  localStorage.setItem(LS_ROUTE, JSON.stringify({ url: cur, kind: 'wan', ts: now }));
+  setBadge('wan', '校外隧道');
+  $('routeDetail').textContent = '使用隧道线路（720P 压缩）。如果你是校园网内用户，点下面的按钮切换直连';
+  const t = $('switchTitle');
+  if (t) t.textContent = '未检测到直连，当前走隧道';
+  return routeInfo;
+}
+
+/* ---------- 手动切换 ---------- */
+async function manualLan() {
+  let urls = [];
+  try {
+    const r = await fetch('/routes.json?_=' + Date.now(), { cache: 'no-store' });
+    urls = ((await r.json()).lan || []).map(x => x.url);
+  } catch (_) {}
+  if (!urls.length) { showMsg('err', '服务器没有识别到局域网网卡，请联系主讲人'); return; }
+
+  setBadge('detecting', '正在探测…');
+  showMsg('info', '正在尝试直连 ' + urls[0] + ' …');
+
+  // 先试着探测一次。带有用户手势的请求有机会触发浏览器的"本地网络访问"授权弹窗，
+  // 授权通过了就能自动切过去；被策略直接拒绝也不会卡住(失败是毫秒级的)。
+  for (const url of urls) {
+    if (await probe(url, 2000)) {
+      localStorage.setItem(LS_ROUTE, JSON.stringify({ url, kind: 'lan', ts: Date.now() }));
+      location.replace(url + '/');
+      return;
+    }
+  }
+
+  // 探测被浏览器策略拦掉了 —— 但"点链接跳转"不受该策略限制，改在新标签页打开
+  const url = urls[0];
+  localStorage.setItem(LS_ROUTE, JSON.stringify({ url, kind: 'lan', ts: Date.now() }));
+  const w = window.open(url + '/', '_blank');
+  if (w) {
+    showMsg('info',
+      '已在新标签页打开直连地址 <code>' + url + '</code><br>' +
+      '<b>能显示直播画面</b> → 直连成功，以后打开本页会自动走直连；<br>' +
+      '<b>打不开</b> → 说明你确实不在校园网内，关掉那个标签页，继续用当前页面即可。');
+  } else {
+    showMsg('err', '浏览器拦截了新标签页。请手动在地址栏打开：<code>' + url + '</code>');
+  }
+}
+function manualWan() {
+  localStorage.setItem(LS_ROUTE, JSON.stringify({ url: location.origin, kind: 'wan', ts: Date.now() }));
+  routeInfo = { kind: 'wan', url: location.origin, detail: '' };
+  setBadge('wan', '校外隧道');
+  $('routeDetail').textContent = '已手动切换到隧道线路（720P 压缩）';
+  showMsg('info', '已切换到隧道线路。');
+}
+
+/* ---------- 进入 ---------- */
+async function join() {
+  const name = $('nameInput').value.trim();
+  if (!name) { showMsg('err', '请输入你的名字'); return; }
+  $('joinBtn').disabled = true;
+  $('joinBtn').textContent = '校验中…';
+  try {
+    // 由页面自己申报线路: 走 TCP 隧道时服务端看到的所有来源 IP 都是 127.0.0.1,
+    // 没法靠 IP 判断内外网, 只有浏览器自己知道当前用的是哪条地址。
+    let via = 'wan';
+    try {
+      const j = await (await fetch('/routes.json?_=' + Date.now(), { cache: 'no-store' })).json();
+      if ((j.lan || []).some(x => x.url === location.origin)) via = 'lan';
+    } catch (_) { /* 保持 wan */ }
+
+    const r = await fetch('/api/join', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, via })
+    });
+    const j = await r.json();
+    if (!j.ok) {
+      showMsg('err', j.error || '进入失败');
+      $('joinBtn').disabled = false;
+      $('joinBtn').textContent = '进入直播';
+      return;
+    }
+    localStorage.setItem(LS_TOKEN, j.token);
+    localStorage.setItem(LS_NAME, j.name);
+    localStorage.setItem(LS_ROUTE, JSON.stringify({ url: location.origin, kind: j.via, ts: Date.now() }));
+    showMsg('ok', '欢迎，' + j.name + '。正在进入…');
+    location.href = '/watch';
+  } catch (e) {
+    showMsg('err', '网络错误：' + e.message);
+    $('joinBtn').disabled = false;
+    $('joinBtn').textContent = '进入直播';
+  }
+}
+
+/* ---------- 启动 ---------- */
+(async function init() {
+  const token = localStorage.getItem(LS_TOKEN);
+  if (token) {
+    try {
+      const r = await fetch('/api/me?token=' + encodeURIComponent(token));
+      if (r.ok) { location.href = '/watch'; return; }
+    } catch (_) { /* ignore */ }
+    localStorage.removeItem(LS_TOKEN);
+  }
+  const cached = localStorage.getItem(LS_NAME);
+  if (cached) $('nameInput').value = cached;
+
+  $('switchCard').style.display = '';
+  const r = await detectRoute(false);
+  if (r === null) return;   // 正在跳转
+  try {
+    const rr = await fetch('/routes.json', { cache: 'no-store' });
+    const jj = await rr.json();
+    const urls = (jj.lan || []).map(x => x.url + '  [' + x.iface + ']');
+    $('lanList').innerHTML = urls.length
+      ? '本次识别到的内网地址：<br><code>' + urls.join('</code><br><code>') + '</code>'
+      : '未识别到内网网卡。';
+  } catch (_) { /* ignore */ }
+  $('nameInput').focus();
+})();
+
+$('joinBtn').addEventListener('click', join);
+$('nameInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') join(); });
+$('forceLan').addEventListener('click', manualLan);
+$('forceWan').addEventListener('click', manualWan);
+$('redetect').addEventListener('click', async () => {
+  localStorage.removeItem(LS_ROUTE);
+  location.reload();
+});
+</script>
+</body>
+</html>

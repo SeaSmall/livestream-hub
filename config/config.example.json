@@ -1,0 +1,31 @@
+{
+  "port": 7000,
+  "hostKey": "SETUP_WILL_REPLACE_THIS",
+  "mediamtxHost": "127.0.0.1",
+  "hlsPort": 8888,
+  "webrtcPort": 8889,
+  "quotaGB": 100,
+  "lanIfaces": [],
+  "excludeIfaces": [
+    "VMnet",
+    "VMware",
+    "Bluetooth",
+    "Loopback",
+    "vEthernet",
+    "WSL",
+    "Virtual"
+  ],
+  "lanProbeTimeoutMs": 800,
+  "routeCacheMs": 300000,
+  "streamPaths": {
+    "lan": "live",
+    "wan": "wan",
+    "raw": "live"
+  },
+  "video": {
+    "lan": "webrtc",
+    "wan": "hls"
+  },
+  "publicUrl": "",
+  "clearChatOnStart": true
+}

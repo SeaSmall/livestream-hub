@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>WHEP 自检</title>
+<style>body{font:14px monospace;background:#111;color:#eee;padding:16px}pre{white-space:pre-wrap}</style>
+</head>
+<body>
+<pre id="out">self-test starting…</pre>
+<script>
+'use strict';
+const out = document.getElementById('out');
+function report(stage, data) {
+  const line = JSON.stringify(Object.assign({ stage, t: Math.round(performance.now()) }, data || {}));
+  out.textContent += '\n' + line;
+  try {
+    fetch('/api/selftest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: line, keepalive: true
+    }).catch(() => {});
+  } catch (_) {}
+}
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+(async () => {
+  const path = new URLSearchParams(location.search).get('path') || 'live';
+  report('begin', { path, ua: navigator.userAgent.slice(0, 60) });
+  try {
+    const pc = new RTCPeerConnection({ iceServers: [] });
+    const tracks = [];
+
+    pc.ontrack = (ev) => {
+      tracks.push(ev.track.kind);
+      report('track', { kind: ev.track.kind });
+    };
+    pc.oniceconnectionstatechange = () => report('ice', { state: pc.iceConnectionState });
+    pc.onconnectionstatechange = () => report('conn', { state: pc.connectionState });
+
+    pc.addTransceiver('video', { direction: 'recvonly' });
+    pc.addTransceiver('audio', { direction: 'recvonly' });
+
+    await pc.setLocalDescription(await pc.createOffer());
+    await new Promise((r) => {
+      if (pc.iceGatheringState === 'complete') return r();
+      const t = setTimeout(r, 2500);
+      pc.addEventListener('icegatheringstatechange', () => {
+        if (pc.iceGatheringState === 'complete') { clearTimeout(t); r(); }
+      });
+    });
+    const sdp = pc.localDescription.sdp;
+    report('offer', {
+      bytes: sdp.length,
+      candidates: (sdp.match(/a=candidate/g) || []).length,
+      codecs: (sdp.match(/^a=rtpmap:\d+ (\S+)/gm) || []).map(s => s.split(' ')[1]).join(',')
+    });
+
+    const res = await fetch(`/whep/${path}/whep`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/sdp' },
+      body: sdp
+    });
+    report('whep', { status: res.status });
+    if (!res.ok) {
+      report('fail', { body: (await res.text()).slice(0, 400) });
+      return;
+    }
+    await pc.setRemoteDescription({ type: 'answer', sdp: await res.text() });
+
+    await new Promise((r) => {
+      const t = setTimeout(r, 12000);
+      pc.addEventListener('connectionstatechange', () => {
+        const s = pc.connectionState;
+        if (s === 'connected' || s === 'failed') { clearTimeout(t); r(); }
+      });
+    });
+    report('connected', { state: pc.connectionState });
+
+    await sleep(7000);
+    const stats = await pc.getStats();
+    stats.forEach((r) => {
+      if (r.type === 'inbound-rtp') {
+        report('inbound', { kind: r.kind, packets: r.packetsReceived, bytes: r.bytesReceived });
+      } else if (r.type === 'candidate-pair' && r.state === 'succeeded') {
+        report('pair', { local: r.localCandidateId, remote: r.remoteCandidateId, rtt: r.currentRoundTripTime });
+      }
+    });
+    report('tracksFinal', { list: tracks.join(',') || '(none)' });
+    report('done', {});
+  } catch (e) {
+    report('error', { msg: String((e && e.message) || e) });
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+{
+  "name": "livestream-hub",
+  "version": "1.0.0",
+  "private": true,
+  "description": "OBS 直播中枢：入口分流 / 真名门禁聊天 / HLS+WebRTC 代理与流量统计",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "hls.js": "^1.7.3",
+    "ws": "^8.18.0"
+  }
+}

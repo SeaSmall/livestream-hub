@@ -1,0 +1,22 @@
+# 运行时私有数据（含个人信息 / 密钥，绝不入库）
+/data/config.json
+/data/names.txt
+/data/sessions.json
+/data/chat.jsonl
+/data/stats.json
+/data/hostwin-profile/
+
+# 日志
+/logs/
+
+# 第三方二进制与依赖（由 setup.ps1 拉取）
+/bin/mediamtx/
+bin/frpc/
+/server/node_modules/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini

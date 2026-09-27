@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<title>直播中</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div class="stage">
+
+  <div class="player-col">
+    <div class="video-frame" id="videoFrame">
+      <video id="v" playsinline webkit-playsinline autoplay muted></video>
+      <div class="overlay" id="overlay">
+        <div class="spinner" id="spin"></div>
+        <div id="ovText">正在连接…</div>
+        <button class="ghost" id="retryBtn" style="display:none">重试</button>
+      </div>
+
+      <!-- 全屏时才出现的弹幕层 -->
+      <div class="fs-layer" id="fsLayer"></div>
+
+      <!-- 全屏时的底部输入条（仿 B 站） -->
+      <div class="fs-bar" id="fsBar">
+        <input type="text" id="fsInput" placeholder="发条弹幕…" maxlength="300"
+               autocomplete="off" enterkeyhint="send">
+        <button class="fs-send" id="fsSendBtn">发送</button>
+      </div>
+
+      <!-- 全屏退出/弹幕开关 -->
+      <div class="fs-top" id="fsTop">
+        <span class="fs-hint">点屏幕显示输入框</span>
+        <span class="spacer"></span>
+        <button class="fs-mini" id="dmToggle" title="显示/隐藏弹幕">弹幕 开</button>
+        <button class="fs-mini" id="fsExit" title="退出全屏">退出全屏</button>
+      </div>
+    </div>
+    <div class="statusbar">
+      <span class="dot" id="dot"></span>
+      <span id="stText">连接中</span>
+      <span id="soundBtn" style="display:none;cursor:pointer;color:var(--accent2);font-weight:600">🔇 点击开启声音</span>
+      <span class="spacer"></span>
+      <span id="stRoute" class="badge detecting">—</span>
+      <span id="stLag">—</span>
+      <span id="stOnline">—</span>
+      <button class="fs-btn" id="fsBtn" title="全屏">⛶ 全屏</button>
+    </div>
+  </div>
+
+  <div class="chat-col">
+    <div class="chat-head">
+      <strong>聊天</strong>
+      <span class="spacer"></span>
+      <span class="tip" id="onlineTip">连接中…</span>
+    </div>
+    <div class="chat-list" id="chatList"></div>
+    <div class="chat-foot">
+      <input type="text" id="msgInput" placeholder="说点什么…（回车发送）" maxlength="300" autocomplete="off">
+      <button class="primary" id="sendBtn">发送</button>
+    </div>
+  </div>
+
+</div>
+
+<script src="/hls.min.js"></script>
+<script>
+'use strict';
+const $ = (id) => document.getElementById(id);
+const video = $('v');
+const LS_TOKEN = 'ls_token_v1';
+const LS_ROUTE = 'ls_route_v1';
+
+const token = localStorage.getItem(LS_TOKEN);
+const myName = localStorage.getItem('ls_name_v1') || '';
+if (!token) location.href = '/';
+
+const route = JSON.parse(localStorage.getItem(LS_ROUTE) || 'null') || { kind: 'wan', url: location.origin };
+const onLan = location.origin === route.url;
+
+const PATHS = { lan: 'live', wan: 'wan' };
+let hls = null, pc = null, ws = null, currentMode = '';
+
+/* ---------------- 状态显示 ---------------- */
+function setStatus(state, text) {
+  $('dot').className = 'dot ' + (state === 'ok' ? 'ok' : state === 'err' ? 'err' : '');
+  $('stText').textContent = text;
+}
+function setOverlay(show, text, retry) {
+  $('overlay').className = show ? 'overlay' : 'overlay hide';
+  if (text) $('ovText').textContent = text;
+  $('spin').style.display = retry ? 'none' : '';
+  $('retryBtn').style.display = retry ? '' : 'none';
+}
+function setRouteBadge() {
+  const b = $('stRoute');
+  if (currentMode === 'webrtc' && onLan) { b.className = 'badge lan'; b.textContent = '校园网直连 · WebRTC'; }
+  else if (currentMode === 'hls-lan') { b.className = 'badge lan'; b.textContent = '校园网直连 · HLS'; }
+  else { b.className = 'badge wan'; b.textContent = '隧道 · HLS 720P'; }
+}
+
+/* ---------------- WebRTC (WHEP) ---------------- */
+function iceDone(p, ms) {
+  return new Promise((res) => {
+    if (p.iceGatheringState === 'complete') return res();
+    const t = setTimeout(res, ms);
+    p.addEventListener('icegatheringstatechange', () => {
+      if (p.iceGatheringState === 'complete') { clearTimeout(t); res(); }
+    });
+  });
+}
+function waitState(p, ms) {
+  return new Promise((res, rej) => {
+    if (p.connectionState === 'connected') return res();
+    const t = setTimeout(() => rej(new Error('ICE 超时')), ms);
+    p.addEventListener('connectionstatechange', () => {
+      if (p.connectionState === 'connected') { clearTimeout(t); res(); }
+      else if (p.connectionState === 'failed') { clearTimeout(t); rej(new Error('ICE 失败')); }
+    });
+  });
+}
+async function startWebRTC(path) {
+  const p = new RTCPeerConnection({ iceServers: [] });
+  const stream = new MediaStream();
+  p.addTransceiver('video', { direction: 'recvonly' });
+  p.addTransceiver('audio', { direction: 'recvonly' });
+  p.ontrack = (ev) => {
+    ev.streams[0].getTracks().forEach(t => { if (!stream.getTracks().includes(t)) stream.addTrack(t); });
+    video.srcObject = stream;
+  };
+  await p.setLocalDescription(await p.createOffer());
+  await iceDone(p, 1500);
+  const r = await fetch(`/whep/${path}/whep`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/sdp' },
+    body: p.localDescription.sdp
+  });
+  if (!r.ok) { p.close(); throw new Error('WHEP HTTP ' + r.status); }
+  await p.setRemoteDescription({ type: 'answer', sdp: await r.text() });
+  await waitState(p, 5000);
+  return p;
+}
+
+/* ---------------- HLS ---------------- */
+function startHLS(path) {
+  return new Promise((resolve, reject) => {
+    const url = `/hls/${path}/index.m3u8`;
+    if (hls) { try { hls.destroy(); } catch (_) {} hls = null; }
+    if (window.Hls && Hls.isSupported()) {
+      hls = new Hls({
+        lowLatencyMode: true,
+        backBufferLength: 15,
+        maxBufferLength: 6,
+        liveSyncDurationCount: 2,
+        manifestLoadingTimeOut: 12000,
+        manifestLoadingMaxRetry: 4,
+        fragLoadingMaxRetry: 6
+      });
+      hls.on(Hls.Events.ERROR, (_, data) => {
+        if (data.fatal) {
+          if (data.type === Hls.ErrorTypes.NETWORK_ERROR) { try { hls.startLoad(); return; } catch (_) {} }
+          if (data.type === Hls.ErrorTypes.MEDIA_ERROR) { try { hls.recoverMediaError(); return; } catch (_) {} }
+          reject(new Error('HLS 致命错误: ' + data.details));
+        }
+      });
+      hls.on(Hls.Events.MANIFEST_PARSED, () => resolve());
+      hls.loadSource(url);
+      hls.attachMedia(video);
+      setTimeout(() => reject(new Error('HLS 加载超时')), 15000);
+    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      video.src = url;
+      video.addEventListener('loadedmetadata', () => resolve(), { once: true });
+      setTimeout(() => reject(new Error('HLS 加载超时')), 15000);
+    } else {
+      reject(new Error('浏览器不支持 HLS'));
+    }
+  });
+}
+
+/* ---------------- 连接编排 ---------------- */
+async function connect() {
+  setOverlay(true, '正在连接…');
+  $('retryBtn').style.display = 'none';
+
+  // 局域网优先 WebRTC(带声音、亚秒延迟); 若 OBS 走 WHIP 推流,
+  // live 的音轨是 Opus, 其 HLS 兼容性不保证, 所以兜底直接落到 wan(720p/AAC)
+  const plan = onLan
+    ? [['webrtc', PATHS.lan], ['hls-wan', PATHS.wan]]
+    : [['hls-wan', PATHS.wan], ['hls-lan', PATHS.lan]];
+
+  for (const [mode, path] of plan) {
+    try {
+      setOverlay(true, mode === 'webrtc' ? '正在建立低延迟连接…' : '正在加载直播流…');
+      if (mode === 'webrtc') { pc = await startWebRTC(path); }
+      else { await startHLS(path); }
+      currentMode = mode;
+      setRouteBadge();
+      setStatus('ok', '已连接');
+      setOverlay(false);
+      $('soundBtn').style.display = '';
+      try { await video.play(); } catch (_) {}
+      return;
+    } catch (e) {
+      console.warn('线路失败', mode, e.message);
+      if (pc) { try { pc.close(); } catch (_) {} pc = null; }
+      if (hls) { try { hls.destroy(); } catch (_) {} hls = null; }
+    }
+  }
+  setStatus('err', '连接失败');
+  setOverlay(true, '无法连接到直播流。\n请确认 OBS 正在推流，或稍后重试。', true);
+}
+
+/* ---------------- 聊天 ---------------- */
+function addMsg(m, mine) {
+  const d = document.createElement('div');
+  d.className = 'chat-item fly' + (mine ? ' mine' : '');
+  const t = new Date(m.ts || Date.now());
+  const hh = String(t.getHours()).padStart(2, '0') + ':' + String(t.getMinutes()).padStart(2, '0');
+  d.innerHTML = `<span class="who">${esc(m.name)}</span><span style="color:var(--muted);font-size:11.5px">${hh}</span><br>${esc(m.text)}`;
+  $('chatList').appendChild(d);
+  $('chatList').scrollTop = $('chatList').scrollHeight;
+  while ($('chatList').children.length > 300) $('chatList').removeChild($('chatList').firstChild);
+  emitDanmaku(m);   // 全屏时同时飘一条弹幕
+}
+function addSys(text) {
+  const d = document.createElement('div');
+  d.className = 'chat-item sys';
+  d.textContent = text;
+  $('chatList').appendChild(d);
+  $('chatList').scrollTop = $('chatList').scrollHeight;
+}
+function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+
+function connectChat() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/chat?token=${encodeURIComponent(token)}`);
+  ws.onopen = () => { $('onlineTip').textContent = '已连接'; };
+  ws.onmessage = (ev) => {
+    let m; try { m = JSON.parse(ev.data); } catch (_) { return; }
+    if (m.t === 'hello') {
+      (m.history || []).forEach(x => addMsg(x, x.name === myName));
+      addSys('—— 已进入聊天 ——');
+    } else if (m.t === 'msg') {
+      addMsg(m, m.name === myName);
+    } else if (m.t === 'presence') {
+      $('onlineTip').textContent = m.online + ' 人在线';
+      $('stOnline').textContent = m.online + ' 人在线';
+    } else if (m.t === 'warn') {
+      addSys(m.text);
+    } else if (m.t === 'cleared') {
+      // 开播/手动清空：本地也一起清掉，保证"每开播聊天都是新的"
+      $('chatList').innerHTML = '';
+      $('fsLayer').innerHTML = '';
+      addSys('—— 新一轮直播开始，聊天已重置 ——');
+    } else if (m.t === 'stats') {
+      /* 观众端不展示流量 */
+    }
+  };
+  ws.onclose = () => {
+    $('onlineTip').textContent = '连接断开，重连中…';
+    setTimeout(connectChat, 3000);
+  };
+  ws.onerror = () => {};
+}
+function send(fromEl) {
+  const el = fromEl || $('msgInput');
+  const text = el.value.trim();
+  if (!text) return;
+  if (!ws || ws.readyState !== 1) { addSys('聊天还没连上，稍等一下再发'); return; }
+  ws.send(JSON.stringify({ t: 'msg', text }));
+  el.value = '';
+  try { el.focus(); } catch (_) {}
+}
+
+/* ---------------- 全屏 & 弹幕 ---------------- */
+const stage = document.querySelector('.stage');
+const frame = $('videoFrame');
+let fsActive = false, dmOn = true, fsHideTimer = null;
+
+function fsElement() {
+  return document.fullscreenElement || document.webkitFullscreenElement ||
+         document.mozFullScreenElement || document.msFullscreenElement || null;
+}
+function requestFs(el) {
+  const fn = el.requestFullscreen || el.webkitRequestFullscreen ||
+             el.mozRequestFullScreen || el.msRequestFullscreen;
+  if (!fn) return Promise.reject(new Error('fullscreen unsupported'));
+  try { const r = fn.call(el); return (r && r.then) ? r : Promise.resolve(); }
+  catch (e) { return Promise.reject(e); }
+}
+function exitFs() {
+  const fn = document.exitFullscreen || document.webkitExitFullscreen ||
+             document.mozCancelFullScreen || document.msExitFullscreen;
+  if (!fn) return Promise.reject(new Error('fullscreen unsupported'));
+  try { const r = fn.call(document); return (r && r.then) ? r : Promise.resolve(); }
+  catch (e) { return Promise.reject(e); }
+}
+
+async function toggleFullscreen() {
+  if (fsElement()) { try { await exitFs(); } catch (_) {} return; }
+  try {
+    await requestFs(stage);
+  } catch (_) {
+    // iOS Safari 不支持给普通元素全屏，只能退到视频原生全屏
+    if (video.webkitEnterFullscreen) {
+      try { video.webkitEnterFullscreen(); return; } catch (_) {}
+    }
+    addSys('这个浏览器不支持网页全屏。iPhone 上可以先「添加到主屏幕」再打开，或把手机横过来看。');
+  }
+}
+
+function onFullscreenChange() {
+  const on = !!fsElement();
+  fsActive = on;
+  stage.classList.toggle('is-fs', on);
+  $('fsBtn').textContent = on ? '⛶ 退出全屏' : '⛶ 全屏';
+  if (on) { showFsUi(); }
+  else { $('fsLayer').innerHTML = ''; $('fsBar').style.bottom = ''; stage.classList.remove('fs-ui'); }
+  setTimeout(() => window.scrollTo(0, 0), 80);
+}
+['fullscreenchange', 'webkitfullscreenchange', 'mozfullscreenchange', 'MSFullscreenChange']
+  .forEach(ev => document.addEventListener(ev, onFullscreenChange));
+
+function showFsUi() {
+  if (!fsActive) return;
+  stage.classList.add('fs-ui');
+  clearTimeout(fsHideTimer);
+  // 输入框聚焦时不要自动隐藏，否则键盘一弹就没了
+  if (document.activeElement && document.activeElement.id === 'fsInput') return;
+  fsHideTimer = setTimeout(() => stage.classList.remove('fs-ui'), 4000);
+}
+function toggleFsUi() {
+  if (stage.classList.contains('fs-ui')) stage.classList.remove('fs-ui');
+  else showFsUi();
+}
+
+frame.addEventListener('click', (e) => {
+  if (!fsActive) return;
+  if (e.target.closest('.fs-bar') || e.target.closest('.fs-top')) return;
+  toggleFsUi();
+});
+frame.addEventListener('mousemove', showFsUi);
+frame.addEventListener('touchstart', () => { if (fsActive) showFsUi(); }, { passive: true });
+
+// 手机弹键盘时把输入条顶上去（只靠 CSS 做不到）
+if (window.visualViewport) {
+  const vv = window.visualViewport;
+  const fixBar = () => {
+    if (!fsActive) { $('fsBar').style.bottom = ''; return; }
+    const kb = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+    $('fsBar').style.bottom = kb + 'px';
+  };
+  vv.addEventListener('resize', fixBar);
+  vv.addEventListener('scroll', fixBar);
+}
+
+/* 弹幕：全屏时把消息飘过去 */
+let dmLane = 0;
+function emitDanmaku(m) {
+  if (!fsActive || !dmOn) return;
+  const layer = $('fsLayer');
+  if (!layer) return;
+  const el = document.createElement('div');
+  el.className = 'dm';
+  el.textContent = (m.name ? m.name + '：' : '') + m.text;
+  el.style.top = (6 + (dmLane++ % 5) * 9.5) + '%';
+  // 依文字长度调整飞行时长，保证速度观感一致
+  el.style.animationDuration = Math.min(16, Math.max(7, el.textContent.length * 0.32)) + 's';
+  layer.appendChild(el);
+  el.addEventListener('animationend', () => el.remove());
+  setTimeout(() => el.remove(), 20000);
+  while (layer.children.length > 40) layer.removeChild(layer.firstChild);
+}
+
+$('fsBtn').addEventListener('click', toggleFullscreen);
+$('fsExit').addEventListener('click', (e) => { e.stopPropagation(); exitFs().catch(() => {}); });
+$('dmToggle').addEventListener('click', (e) => {
+  e.stopPropagation();
+  dmOn = !dmOn;
+  $('dmToggle').textContent = '弹幕 ' + (dmOn ? '开' : '关');
+  if (!dmOn) $('fsLayer').innerHTML = '';
+  showFsUi();
+});
+$('fsSendBtn').addEventListener('click', (e) => { e.stopPropagation(); send($('fsInput')); showFsUi(); });
+$('fsInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); send($('fsInput')); showFsUi(); }
+});
+$('fsInput').addEventListener('focus', showFsUi);
+$('fsInput').addEventListener('blur', showFsUi);
+window.addEventListener('orientationchange', () => setTimeout(() => { showFsUi(); window.scrollTo(0, 0); }, 250));
+
+/* ---------------- 延迟上报(给主机端做同步补偿) ---------------- */
+setInterval(() => {
+  if (!ws || ws.readyState !== 1) return;
+  let ms = 0;
+  if (hls && typeof hls.latency === 'number') ms = hls.latency * 1000;
+  else if (pc) {
+    const r = pc.connectionState === 'connected' ? 250 : 0;
+    ms = r;
+  }
+  if (ms > 0) {
+    ws.send(JSON.stringify({ t: 'lag', ms: Math.round(ms) }));
+    $('stLag').textContent = '延迟 ' + (ms / 1000).toFixed(1) + 's';
+  }
+}, 5000);
+
+/* ---------------- 事件 ---------------- */
+$('sendBtn').addEventListener('click', send);
+$('msgInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') send(); });
+$('retryBtn').addEventListener('click', () => { if (pc) { try { pc.close(); } catch (_) {} pc = null; } connect(); });
+$('soundBtn').addEventListener('click', () => {
+  video.muted = false;
+  video.volume = 1;
+  $('soundBtn').style.display = 'none';
+});
+
+video.addEventListener('playing', () => setStatus('ok', '播放中'));
+video.addEventListener('waiting', () => setStatus('', '缓冲中…'));
+
+connect();
+connectChat();
+</script>
+</body>
+</html>

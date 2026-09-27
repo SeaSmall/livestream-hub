@@ -1,0 +1,112 @@
+###############################################
+# MediaMTX 配置（由 setup.ps1 从本模板生成到 bin/mediamtx/mediamtx.yml）
+#
+# 占位符：
+#   {{ROOT}}   项目根目录，例如 C:/livestream-hub
+#   {{FFMPEG}} ffmpeg.exe 的完整路径（正斜杠）
+#
+# 数据流：
+#   OBS --WHIP--> [live] --原画--> 局域网观众 (WebRTC/WHEP, UDP 8189)
+#                   |
+#                   +--按需转码 720p--> [wan] --> 外网观众 (LL-HLS)
+#
+# 端口策略：只对外暴露 7000/TCP(网页+聊天+反代) 与 8189/UDP(WebRTC 媒体)，
+#           其余 HTTP 服务一律绑 127.0.0.1，由 Node 中枢统一反代。
+###############################################
+
+logLevel: info
+logDestinations: [stdout, file]
+logStructured: false
+logFile: {{ROOT}}/logs/mediamtx.log
+
+###############################################
+# 控制 API（本地调试用）
+api: true
+apiAddress: 127.0.0.1:9997
+
+metrics: false
+playback: false
+pprof: false
+
+###############################################
+# RTSP：仅本地，"按需转码"的 ffmpeg 从这里拉流
+rtsp: true
+rtspAddress: 127.0.0.1:8554
+rtspTransports: [tcp]
+
+###############################################
+# RTMP：备用推流入口（首选 WHIP，因为 WebRTC 只认 Opus 音频）
+rtmp: true
+rtmpAddress: 127.0.0.1:1935
+rtmpEncryption: "no"
+
+###############################################
+# HLS：外网观众走这条，经 Node 中枢反代，所以只绑本地
+hls: true
+hlsAddress: 127.0.0.1:8888
+hlsAllowOrigins: ["*"]
+hlsVariant: lowLatency
+hlsSegmentCount: 7
+hlsSegmentDuration: 1s
+hlsPartDuration: 200ms
+hlsSegmentMaxSize: 20M
+hlsMuxerCloseAfter: 60s
+
+###############################################
+# WebRTC：局域网观众走这条（UDP 8189 直连，延迟毫秒级）
+webrtc: true
+webrtcAddress: 127.0.0.1:8889
+webrtcAllowOrigins: ["*"]
+# 只有这个 UDP 口对局域网开放
+webrtcLocalUDPAddress: :8189
+# TCP/ICE 默认关闭；若要让外网观众也走 WebRTC，
+# 这里填 :8189 并在穿透服务上开一条"远程端口=8189"的 TCP 隧道
+webrtcLocalTCPAddress: ""
+# 自动把网卡 IP 作为 ICE 候选发给观众
+webrtcIPsFromInterfaces: true
+webrtcIPsFromInterfacesList: []
+# 排除虚拟机/蓝牙等干扰网卡，否则观众会拿到连不通的候选地址
+webrtcIPsFromInterfacesExcludeList:
+  ["VMnet", "VMware", "Bluetooth", "Loopback", "vEthernet", "WSL", "Virtual"]
+webrtcAdditionalHosts: []
+# 纯局域网直连不需要 STUN/TURN；跨公网打洞请自行填 STUN
+webrtcICEServers2: []
+webrtcHandshakeTimeout: 10s
+webrtcTrackGatherTimeout: 3s
+
+srt: false
+moq: false
+
+###############################################
+paths:
+  # ── 原始档：OBS 直推，不做任何加工 ──
+  live: {}
+
+  # ── 局域网 WebRTC 档：视频直接 copy（不重编码），只把音轨转成 Opus ──
+  #    仅当 OBS 用 RTMP 推流时才需要（AAC → Opus）；用 WHIP 推流时
+  #    live 本来就是 Opus，直接把 data/config.json 的 streamPaths.lan 设为 "live" 即可。
+  lanav:
+    runOnDemand: >-
+      {{FFMPEG}} -hide_banner -loglevel warning
+      -rtsp_transport tcp -i rtsp://127.0.0.1:8554/live
+      -c:v copy -c:a libopus -b:a 96k -ar 48000 -ac 2
+      -f rtsp -rtsp_transport tcp rtsp://127.0.0.1:8554/lanav
+    runOnDemandRestart: true
+    runOnDemandStartTimeout: 20s
+    runOnDemandCloseAfter: 30s
+
+  # ── 外网压缩档：有人看才启动转码，没人在线零开销 ──
+  wan:
+    runOnDemand: >-
+      {{FFMPEG}} -hide_banner -loglevel warning
+      -rtsp_transport tcp -i rtsp://127.0.0.1:8554/live
+      -c:v h264_nvenc -preset p4 -tune ll -rc vbr -cq 28 -b:v 0 -maxrate 1500k -bufsize 3000k
+      -g 25 -keyint_min 25 -vf scale=w=-2:h=720 -r 25
+      -c:a aac -b:a 64k -ar 48000 -ac 2
+      -f rtsp -rtsp_transport tcp rtsp://127.0.0.1:8554/wan
+    runOnDemandRestart: true
+    runOnDemandStartTimeout: 25s
+    # 最后一个观众断开后 30 秒停止转码，不占 GPU 也不占流量
+    runOnDemandCloseAfter: 30s
+
+  all_others:
