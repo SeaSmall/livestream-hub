@@ -247,6 +247,11 @@ async function join(takeover) {
 
 /* ---------- 启动 ---------- */
 (async function init() {
+  // 被主讲人移出观看的人会被观看页送回来，这里给一句明确的原因，
+  // 不然页面看起来就像"莫名其妙掉线了"。
+  const kickedHint = localStorage.getItem('ls_kicked_hint');
+  if (kickedHint) { localStorage.removeItem('ls_kicked_hint'); showMsg('err', esc(kickedHint)); }
+
   const token = localStorage.getItem(LS_TOKEN);
   if (token) {
     try {

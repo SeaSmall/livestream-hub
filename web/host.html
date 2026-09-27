@@ -19,6 +19,8 @@
 
   <div class="hw-online" id="hwOnline"><span class="tip">等待观众…</span></div>
 
+  <div class="hw-kicked" id="hwKicked" style="display:none"></div>
+
   <div class="hw-list" id="list"></div>
 
   <div class="hw-foot">
@@ -61,7 +63,7 @@ function sysLine(text) {
 }
 
 /* ---------------- 点观众名字 -> 踢出 / 禁言 ---------------- */
-let menuEl = null, currentUsers = [];
+let menuEl = null, currentUsers = [], banAt = 3;
 function closeMenu() { if (menuEl) { menuEl.remove(); menuEl = null; } }
 document.addEventListener('click', (e) => {
   if (menuEl && !menuEl.contains(e.target)) closeMenu();
@@ -86,11 +88,13 @@ function openMenu(chip, u) {
     m.appendChild(b);
   };
   mk(u.muted ? '解除禁言' : '禁言', '', () => sendMod(u.muted ? 'unmute' : 'mute', u.name));
-  mk('踢出', 'danger', () => {
-    if (confirm('把「' + u.name + '」移出观看？\n（对方会立刻断开，需要名字才能重新进来）')) sendMod('kick', u.name);
+  mk('踢出（断画面）', 'danger', () => {
+    if (confirm('把「' + u.name + '」移出观看？\n\n他的画面会立刻断开，会话作废。\n他可以从入口页重新输名字进来；\n连续被移出 ' + (banAt || 3) + ' 次后，本场就不能再进了。')) {
+      sendMod('kick', u.name);
+    }
   });
-  m.style.left = Math.max(4, Math.min(r.left, window.innerWidth - 140)) + 'px';
-  m.style.top = Math.min(r.bottom + 4, window.innerHeight - 90) + 'px';
+  m.style.left = Math.max(4, Math.min(r.left, window.innerWidth - 224)) + 'px';
+  m.style.top = Math.min(r.bottom + 4, Math.max(4, window.innerHeight - 130)) + 'px';
   document.body.appendChild(m);
   menuEl = m;
 }
@@ -144,6 +148,27 @@ function connect() {
             const nm = chip.getAttribute('data-name');
             const u = currentUsers.filter(x => x.name === nm)[0];
             if (u) openMenu(chip, u); else closeMenu();
+          };
+        });
+      }
+      // 本场被踢过的人：显示次数，点一下清零（清零后他就能重新进来）
+      if (typeof m.banAt === 'number') banAt = m.banAt;
+      const kb = $('hwKicked');
+      if (kb) {
+        const out = m.kicked || [];
+        kb.style.display = out.length ? '' : 'none';
+        kb.innerHTML = out.length
+          ? '<span class="hw-kicked-label">本场被移出：</span>' + out.map(u =>
+              `<span class="peer kicked${u.banned ? ' banned' : ''}" data-name="${esc(u.name)}" ` +
+              `title="${u.banned ? '本场已禁足，点一下放他再进来' : '点一下把次数清零（清零后他可以从入口页重新进来）'}">` +
+              `${esc(u.name)} ×${u.count}${u.banned ? ' 已禁足' : ''}</span>`
+            ).join('')
+          : '';
+        Array.prototype.forEach.call(kb.querySelectorAll('.peer.kicked'), (chip) => {
+          chip.onclick = (ev) => {
+            ev.stopPropagation();
+            const nm = chip.getAttribute('data-name');
+            if (confirm('把「' + nm + '」的移出记录清零？\n\n清零后他可以重新从入口页进来观看。')) sendMod('unkick', nm);
           };
         });
       }

@@ -29,5 +29,6 @@
   "publicUrl": "",
   "clearChatOnStart": true,
   "clearSessionsOnStart": true,
+  "kickBanAt": 3,
   "hlsSecret": ""
 }

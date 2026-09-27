@@ -227,12 +227,23 @@ body.hostwin { background: linear-gradient(160deg, #0d1015, #141922); }
   font-size: 12px; color: var(--muted); text-align: center;
   padding: 3px 0; animation: flyin .25s ease-out;
 }
+/* 本场被移出的人：显示次数，点一下清零 */
+.hw-kicked {
+  display: flex; flex-wrap: wrap; gap: 5px; align-items: center;
+  padding: 5px 0; border-bottom: 1px solid var(--line);
+  max-height: 62px; overflow-y: auto; flex: none;
+}
+.hw-kicked-label { font-size: 11.5px; color: var(--muted); }
+body.hostwin .peer.kicked { cursor: pointer; border-color: rgba(255, 176, 32, .5); color: var(--warn); }
+body.hostwin .peer.kicked:hover { border-color: var(--warn); color: #fff; }
+body.hostwin .peer.kicked.banned { border-color: rgba(255, 93, 93, .6); color: #ff8080; text-decoration: line-through; }
+body.hostwin .peer.kicked.banned:hover { border-color: #ff5d5d; color: #fff; text-decoration: none; }
 /* 主机窗里观众名字可点，弹出踢人/禁言菜单 */
 body.hostwin .peer { cursor: pointer; user-select: none; }
 body.hostwin .peer:hover { border-color: var(--accent2); color: #fff; }
 body.hostwin .peer.muted { border-style: dashed; opacity: .78; }
 .mod-menu {
-  position: fixed; z-index: 9999;
+  position: fixed; z-index: 9999; width: 216px;
   display: flex; flex-direction: column; gap: 4px;
   padding: 6px; border-radius: 9px;
   background: #1b212c; border: 1px solid var(--line);
@@ -240,7 +251,8 @@ body.hostwin .peer.muted { border-style: dashed; opacity: .78; }
 }
 .mod-btn {
   font: inherit; font-size: 13px; text-align: left;
-  padding: 7px 14px; border-radius: 6px; cursor: pointer;
+  padding: 7px 12px; border-radius: 6px; cursor: pointer;
+  white-space: normal; line-height: 1.35;
   background: var(--panel2); border: 1px solid var(--line); color: var(--fg);
 }
 .mod-btn:hover { border-color: var(--accent2); }

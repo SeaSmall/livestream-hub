@@ -188,8 +188,27 @@ function statsSnapshot() {
 //   2) 推流从离线变成在线时 —— 服务一直开着也能做到"每开播一次清一次"
 let history = [];
 
-// 禁言名单：内存态，服务重启即清空（每次开播都是干净的）
+// 禁言名单 / 移出记录：都是内存态，服务重启即清空，每开播一次也是干净的
 const muted = new Set();
+// 本场被踢过的人: name -> {count, at}。count 累加，够 kickBanAt() 次才真正禁止重进
+// —— 单次踢出只是"这次请你出去"，手滑了不会把人一棍子打死。
+const kickedOut = new Map();
+// 连续被移出几次才禁足本场。默认 3，可在 data/config.json 里改（kickBanAt）
+function kickBanAt() { return Math.max(2, Math.min(10, Number(C('kickBanAt', 3)) || 3)); }
+function kickRecord(name) { return kickedOut.get(name) || null; }
+function isBanned(name) { const r = kickedOut.get(name); return !!(r && r.count >= kickBanAt()); }
+// 会话能不能用：被踢过的那条会话立刻作废（所以画面会断），
+// 而"本场禁止再进"要连续被踢够 kickBanAt() 次才成立。
+// 返回空串表示放行，否则返回给用户看的原因。
+function sessionBlocked(s) {
+  if (!s) return '会话已失效，请重新进入';
+  if (s.kickedAt) return '你已被移出观看';
+  if (isBanned(s.name)) {
+    const r = kickRecord(s.name);
+    return `你已被连续移出 ${(r && r.count) || kickBanAt()} 次，本场直播无法再进入`;
+  }
+  return '';
+}
 function sysNote(text) {
   try { broadcast({ t: 'sys', text, ts: Date.now() }); } catch (_) { /* wss 还没起来 */ }
 }
@@ -203,6 +222,9 @@ function appendChat(msg) {
 function clearChat(reason) {
   const had = history.length;
   history = [];
+  // 禁言 / 移出名单跟着一起清 —— "每次开播都是新的" 包括这两份名单
+  muted.clear();
+  kickedOut.clear();
   try { fs.writeFileSync(CHAT_FILE, ''); } catch (_) { /* ignore */ }
   try { broadcast({ t: 'cleared', reason: reason || '' }); } catch (_) { /* wss 还没起来 */ }
   if (had) log(`聊天已清空（${reason}），原有 ${had} 条`);
@@ -307,7 +329,59 @@ function routeOf(req, fallback) {
   return fallback;
 }
 
-function proxyToMediaMTX(req, res, remotePath, upstreamPort, counter, pathName, prefix, retried) {
+// ---------------------------------------------------------------- 媒体鉴权
+// 「踢出 = 看不了直播」的执行点就在这里。
+// HLS 分片是 <video>/hls.js 自己发的，带不了自定义请求头，所以约定用 cookie：
+// 进场成功时后端下发 ls_t=<token>，之后浏览器每个媒体请求都会自动带上它。
+// 一旦会话被删（被踢 / 移出白名单 / 过期），下一个分片就 403，画面立刻断。
+const COOKIE_NAME = 'ls_t';
+function cookieToken(req) {
+  const c = String(req.headers.cookie || '');
+  const m = c.match(new RegExp('(?:^|;\\s*)' + COOKIE_NAME + '=([^;]*)'));
+  return m ? decodeURIComponent(m[1]) : '';
+}
+function mediaToken(req) {
+  return cookieToken(req) || (new URL(req.url, 'http://x')).searchParams.get('token') || '';
+}
+function tokenCookie(token) {
+  const maxAge = Math.floor(SESSION_TTL_MS / 1000);
+  return `${COOKIE_NAME}=${token}; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
+}
+// 放行返回 {ok:true, session, token}；否则 {ok:false, code, error}
+const mediaDenyAt = new Map();        // jarKey -> 上次记"拒绝"日志的时间(限流用)
+function mediaAuth(req) {
+  const t = mediaToken(req);
+  if (!t) return { ok: false, code: 401, error: '没有会话凭据，请从入口页重新进入' };
+  const s = sessions.get(t);
+  if (!s || Date.now() - (s.lastSeen || 0) > SESSION_TTL_MS) {
+    if (s) { sessions.delete(t); saveSessions(); }
+    return { ok: false, code: 401, error: '会话已失效，请重新进入' };
+  }
+  if (!nameAllowed(s.name)) {
+    sessions.delete(t); saveSessions();
+    return { ok: false, code: 403, error: '你的名字已不在名单里' };
+  }
+  // 被踢过的那条会话一律不给流：这是"踢出 = 画面立刻断"的执行点。
+  // 他自己重新从入口页进来会拿到新会话，不带上 kickedAt，所以能正常看（除非已被禁足）。
+  const blocked = sessionBlocked(s);
+  if (blocked) return { ok: false, code: 403, error: blocked };
+  s.lastSeen = Date.now();
+  return { ok: true, session: s, token: t };
+}
+
+// 把 MediaMTX 侧的 WebRTC 会话掐掉（局域网观众走 WebRTC，光删会话他不会立刻黑屏，
+// 已经建立的点对点连接还能继续收流，必须让 MediaMTX 主动踢）。
+async function killWebRTCSession(sess) {
+  if (!sess || !sess.whepId) return false;
+  try {
+    const host = C('mediamtxHost', '127.0.0.1');
+    const r = await fetch(`http://${host}:9997/v3/webrtcsessions/kick/${encodeURIComponent(sess.whepId)}`,
+      { method: 'POST', signal: AbortSignal.timeout(3000) });
+    return r.ok;
+  } catch (_) { return false; }
+}
+
+function proxyToMediaMTX(req, res, remotePath, upstreamPort, counter, pathName, prefix, retried, sess) {
   const host = C('mediamtxHost', '127.0.0.1');
   const headers = Object.assign({}, req.headers);
   headers.host = `${host}:${upstreamPort}`;
@@ -333,7 +407,19 @@ function proxyToMediaMTX(req, res, remotePath, upstreamPort, counter, pathName, 
     if (canRetry && upRes.statusCode === 302 && upRes.headers.location) {
       const loc = upRes.headers.location;
       upRes.resume();                                   // 丢弃这次响应体
-      return proxyToMediaMTX(req, res, loc, upstreamPort, counter, pathName, prefix, true);
+      return proxyToMediaMTX(req, res, loc, upstreamPort, counter, pathName, prefix, true, sess);
+    }
+
+    // WHEP 建流成功后 MediaMTX 会在 Location 里给会话 id，记下来，
+    // 踢人时才能把这条 WebRTC 连接从服务端掐断（否则对方画面会继续播）。
+    if (sess && upstreamPort === C('webrtcPort', 8889) && upRes.headers.location) {
+      const id = String(upRes.headers.location).split('?')[0].split('/').filter(Boolean).pop() || '';
+      if (/^[0-9a-fA-F-]{16,}$/.test(id)) {
+        sess.whepId = id;
+        sess.whepAt = Date.now();
+        saveSessions();
+        log(`[媒体] WHEP 会话登记: ${sess.name} -> ${id}`);
+      }
     }
 
     const outHeaders = Object.assign({}, upRes.headers);
@@ -417,6 +503,15 @@ const server = http.createServer(async (req, res) => {
       log(`拒绝进入: "${name}" (${ip}) 不在白名单`);
       return json(res, 403, { ok: false, error: '名字错误：名单里没有这个名字，请填写你的真实姓名' });
     }
+    // 被移出的人：连续被踢够 kickBanAt() 次才禁止本场再进
+    if (isBanned(name)) {
+      const r = kickRecord(name);
+      log(`拒绝进入: "${name}" 本场已被移出 ${r ? r.count : '?'} 次`);
+      return json(res, 403, {
+        ok: false,
+        error: `你已被连续移出 ${r ? r.count : kickBanAt()} 次，本场直播无法再进入。请联系主讲人。`
+      });
+    }
     // 同名唯一
     if (nameInUse(name)) {
       if (takeover) {
@@ -442,7 +537,8 @@ const server = http.createServer(async (req, res) => {
     let via = (declaredVia === 'lan' || declaredVia === 'wan') ? declaredVia : (lan ? 'lan' : 'wan');
     const { token, session } = newSession(name, via, ip);
     log(`准入: ${name} via=${via}${declaredVia ? '(客户端声明)' : '(IP推断)'} ip=${ip}`);
-    return json(res, 200, { ok: true, token, name: session.name, via });
+    // 同时下发媒体 cookie：HLS 分片是播放器自己发的，只能用 cookie 带凭据
+    return json(res, 200, { ok: true, token, name: session.name, via }, { 'Set-Cookie': tokenCookie(token) });
   }
 
   // ---- 会话查询 ----
@@ -456,7 +552,16 @@ const server = http.createServer(async (req, res) => {
       log(`会话作废: "${s.name}" 已不在白名单`);
       return json(res, 401, { ok: false, error: '你的名字已不在名单里，请联系主讲人核对' });
     }
-    return json(res, 200, { ok: true, name: s.name, via: s.via });
+    const blocked = sessionBlocked(s);
+    if (blocked) {
+      // 不删会话：留着它才能让他的媒体请求拿到 403 + 明确原因，而不是含混的 401。
+      // 清扫交给定时任务。
+      if (!s.kickedAt) { s.kickedAt = Date.now(); saveSessions(); }
+      log(`会话作废: "${s.name}" — ${blocked}`);
+      return json(res, 401, { ok: false, error: blocked });
+    }
+    // 顺带续一次媒体 cookie：换线路（隧道<->直连）换的是域名，cookie 得在新域名下重新种
+    return json(res, 200, { ok: true, name: s.name, via: s.via }, { 'Set-Cookie': tokenCookie(t) });
   }
 
   // ---- 流量统计 ----
@@ -485,21 +590,38 @@ const server = http.createServer(async (req, res) => {
   // 端口看协议(8888=HLS, 8889=WebRTC);
   // 流量计数器以客户端申报的线路为准(走 TCP 隧道时服务端看不出内外网),
   // 没申报才退回按 path 名猜。
+  // 必须带有效会话才给流：这是"踢出 = 立刻看不了"的执行点。
   const viaParam = u.searchParams.get('via');
   if (viaParam === 'lan' || viaParam === 'wan') markRoute(req, viaParam);
-  if (p.startsWith('/hls/')) {
-    const rest = p.slice(5).replace(/^\/+/, '');
-    const pathName = rest.split('/')[0] || '';
-    const counter = routeOf(req, pathName === C('streamPaths', {}).wan ? 'wan' : 'lan');
-    return proxyToMediaMTX(req, res, '/' + rest + (u.search || ''),
-      C('hlsPort', 8888), counter, pathName, '/hls');
-  }
-  if (p.startsWith('/whep/')) {
+  if (p.startsWith('/hls/') || p.startsWith('/whep/')) {
+    const auth = mediaAuth(req);
+    if (!auth.ok) {
+      // 只记一次日志，避免播放器重试把日志刷爆
+      const k = jarKey(req);
+      const now = Date.now();
+      if (!mediaDenyAt.has(k) || now - mediaDenyAt.get(k) > 30000) {
+        mediaDenyAt.set(k, now);
+        log(`拒绝媒体请求(${auth.code}): ${auth.error} path=${p.slice(0, 40)}`);
+      }
+      res.writeHead(auth.code, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'no-store',
+        'Access-Control-Allow-Origin': '*'
+      });
+      return res.end(auth.error);
+    }
+    if (p.startsWith('/hls/')) {
+      const rest = p.slice(5).replace(/^\/+/, '');
+      const pathName = rest.split('/')[0] || '';
+      const counter = routeOf(req, pathName === C('streamPaths', {}).wan ? 'wan' : 'lan');
+      return proxyToMediaMTX(req, res, '/' + rest + (u.search || ''),
+        C('hlsPort', 8888), counter, pathName, '/hls', false, auth.session);
+    }
     const rest = p.slice(6).replace(/^\/+/, '');
     const pathName = rest.split('/')[0] || '';
     const counter = routeOf(req, pathName === C('streamPaths', {}).wan ? 'wan' : 'lan');
     return proxyToMediaMTX(req, res, '/' + rest + (u.search || ''),
-      C('webrtcPort', 8889), counter, pathName, '/whep');
+      C('webrtcPort', 8889), counter, pathName, '/whep', false, auth.session);
   }
 
   // ---- 页面 ----
@@ -510,8 +632,10 @@ const server = http.createServer(async (req, res) => {
   return serveStatic(req, res, p.replace(/^\/+/, ''));
 });
 
-function json(res, code, obj) {
-  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+function json(res, code, obj, extraHeaders) {
+  const h = { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' };
+  if (extraHeaders) Object.assign(h, extraHeaders);
+  res.writeHead(code, h);
   res.end(JSON.stringify(obj));
 }
 
@@ -547,6 +671,14 @@ server.on('upgrade', (req, socket, head) => {
   if (!session || !nameAllowed(session.name)) {
     if (session) { sessions.delete(token); saveSessions(); log(`会话作废(WS): "${session.name}" 不在白名单`); }
     socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+  const wsBlocked = sessionBlocked(session);
+  if (wsBlocked) {
+    if (!session.kickedAt) { session.kickedAt = Date.now(); saveSessions(); }
+    log(`会话作废(WS): "${session.name}" — ${wsBlocked}`);
+    socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
     socket.destroy();
     return;
   }
@@ -591,7 +723,11 @@ function onlineUsers() {
 
 function pushPresence() {
   const users = onlineUsers();
-  broadcast({ t: 'presence', online: users.length, users: users.map(u => u.name), detail: users });
+  // 本场被踢过的人（含次数）—— 主人据此决定要不要"清零放行"
+  const kicked = [...kickedOut.entries()]
+    .map(([name, v]) => ({ name, count: (v && v.count) || 0, at: (v && v.at) || 0, banned: isBanned(name) }))
+    .sort((a, b) => a.at - b.at);
+  broadcast({ t: 'presence', online: users.length, users: users.map(u => u.name), detail: users, kicked, banAt: kickBanAt() });
 }
 
 wss.on('connection', (ws) => {
@@ -649,18 +785,47 @@ wss.on('connection', (ws) => {
       if (!target || target === 'HOST') return;
 
       if (action === 'kick') {
+        // 先算次数：这是第几次踢决定了措辞，也决定要不要"禁足本场"
+        const prev = kickRecord(target);
+        const count = (prev ? prev.count : 0) + 1;
+        const banned = count >= kickBanAt();
+        kickedOut.set(target, { count, at: Date.now() });
+
         let n = 0;
+        const killed = [];
         for (const c of wss.clients) {
           if (c.isHost || !c.session || c.session.name !== target) continue;
-          try { c.send(JSON.stringify({ t: 'kicked', reason: '你已被主人移出观看' })); } catch (_) {}
+          // 先掐画面：WebRTC 是已经建好的点对点连接，光断 WebSocket 对方还能继续看。
+          const sess = c.token ? sessions.get(c.token) : null;
+          if (sess && sess.whepId) killed.push(killWebRTCSession(sess));
+          try {
+            c.send(JSON.stringify({ t: 'kicked', reason: '你已被主人移出观看', count, banned }));
+          } catch (_) {}
           try { c.terminate(); } catch (_) {}
-          if (c.token) sessions.delete(c.token);
+          // 这条会话标记作废（不删）：
+          //  - 他手里那个 token 再发媒体请求会拿到 403，画面立刻断
+          //  - 他自己重新从入口页进来会拿到新会话，不带上这个标记，所以还能正常看
+          if (c.token) { const ss = sessions.get(c.token); if (ss) ss.kickedAt = Date.now(); }
           n++;
         }
         muted.delete(target);
         saveSessions();
-        sysNote(n ? `「${target}」已被移出` : `「${target}」已经不在线了`);
-        log(`[管理] 踢出 "${target}"，断开 ${n} 个连接`);
+        if (killed.length) {
+          Promise.allSettled(killed).then((rs) => {
+            const okN = rs.filter(x => x.status === 'fulfilled' && x.value).length;
+            log(`[管理] 踢出 "${target}": 断开 ${n} 个连接，掐掉 ${okN}/${killed.length} 条 WebRTC`);
+          });
+        }
+        if (banned) {
+          sysNote(`「${target}」第 ${count} 次被移出，本场直播不能再进入`);
+        } else {
+          sysNote(`「${target}」已被移出观看（第 ${count} 次）；再被移出 ${kickBanAt() - count} 次，本场就不能再进来了`);
+        }
+        log(`[管理] 踢出 "${target}"（第 ${count} 次，${banned ? '已禁足本场' : '仍可重进'}），断开 ${n} 个连接`);
+      } else if (action === 'unkick') {
+        const had = kickedOut.delete(target);
+        sysNote(had ? `「${target}」的移出记录已清零，可以重新进入` : `「${target}」本来就没有移出记录`);
+        log(`[管理] 清除移出记录 "${target}" (${had ? '有' : '无'})`);
       } else if (action === 'mute' || action === 'unmute') {
         const on = (action === 'mute');
         if (on) muted.add(target); else muted.delete(target);
@@ -719,8 +884,11 @@ setInterval(() => {
 setInterval(() => {
   // 会话过期清理
   let changed = false;
+  const now = Date.now();
   for (const [k, v] of sessions) {
-    if (Date.now() - (v.lastSeen || 0) > SESSION_TTL_MS) { sessions.delete(k); changed = true; }
+    if (now - (v.lastSeen || 0) > SESSION_TTL_MS) { sessions.delete(k); changed = true; }
+    // 被踢的会话留一小时就够（留着只是为了给对方的媒体请求回一句清楚的话）
+    else if (v.kickedAt && now - v.kickedAt > 3600 * 1000) { sessions.delete(k); changed = true; }
   }
   if (changed) saveSessions();
   broadcast({ t: 'stats', ...statsSnapshot() });
