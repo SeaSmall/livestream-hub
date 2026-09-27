@@ -132,7 +132,7 @@ async function startWebRTC(path) {
     video.srcObject = stream;
   };
   await p.setLocalDescription(await p.createOffer());
-  await iceDone(p, 1500);
+  await iceDone(p, 1000);
   // 必须带超时：隧道慢的时候这个请求可能一直挂着，
   // 会让整条降级链卡死在"正在建立低延迟连接…"。
   const ctrl = new AbortController();
@@ -151,7 +151,7 @@ async function startWebRTC(path) {
   } finally { clearTimeout(to); }
   if (!r.ok) { p.close(); throw new Error('WHEP HTTP ' + r.status); }
   await p.setRemoteDescription({ type: 'answer', sdp: await r.text() });
-  await waitState(p, 5000);
+  await waitState(p, 3500);
   return p;
 }
 
@@ -160,6 +160,8 @@ function startHLS(path) {
   return new Promise((resolve, reject) => {
     const url = `/hls/${path}/index.m3u8`;
     if (hls) { try { hls.destroy(); } catch (_) {} hls = null; }
+    // 防御性清理：万一之前试过 WebRTC，srcObject 必须先清掉，否则 MSE 挂不上去
+    try { video.srcObject = null; } catch (_) {}
     if (window.Hls && Hls.isSupported()) {
       hls = new Hls({
         lowLatencyMode: true,
@@ -214,6 +216,31 @@ function reportFail(stage, detail) {
 window.addEventListener('error', (e) => reportFail('js-error', (e.message || '') + ' @line' + (e.lineno || '')));
 window.addEventListener('unhandledrejection', (e) => reportFail('promise', (e.reason && e.reason.message) || e.reason));
 
+// 连上后上报一次，并回报实际播放状态（用来确认画面真的在走，不只是"连上了"）
+let okReported = false;
+function reportOk(mode, path) {
+  if (okReported) return;
+  okReported = true;
+  setTimeout(() => {
+    try {
+      const b = video.buffered;
+      fetch('/api/selftest', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
+        body: JSON.stringify({
+          stage: 'playback-ok', mode, path,
+          route: onLan ? 'lan' : 'wan',
+          playing: !video.paused && video.currentTime > 0.5,
+          currentTime: +video.currentTime.toFixed(2),
+          readyState: video.readyState,
+          buffered: b.length ? +b.end(b.length - 1).toFixed(2) : 0,
+          latency: (hls && typeof hls.latency === 'number') ? +hls.latency.toFixed(2) : null,
+          ua: navigator.userAgent.slice(0, 110)
+        })
+      }).catch(() => {});
+    } catch (_) {}
+  }, 8000);
+}
+
 /* ---------------- 连接编排 ---------------- */
 async function connect() {
   setOverlay(true, '正在连接…');
@@ -237,6 +264,7 @@ async function connect() {
       setOverlay(false);
       $('soundBtn').style.display = '';
       try { await video.play(); } catch (_) {}
+      reportOk(mode, path);
       return;
     } catch (e) {
       tried.push(mode + ': ' + e.message);
@@ -244,6 +272,10 @@ async function connect() {
       reportFail(mode, e.message);
       if (pc) { try { pc.close(); } catch (_) {} pc = null; }
       if (hls) { try { hls.destroy(); } catch (_) {} hls = null; }
+      // 关键！WebRTC 试过之后 video.srcObject 上挂着一个已经死掉的 MediaStream。
+      // 浏览器里 srcObject 和 src(MSE) 互斥，不清掉的话后面 hls.js 根本挂不上去，
+      // 表现就是画面永远停在"缓冲中"。
+      try { video.srcObject = null; } catch (_) {}
     }
   }
   setStatus('err', '连接失败');
@@ -316,7 +348,10 @@ function connectChat() {
   ws.onerror = () => {};
 }
 function send(fromEl) {
-  const el = fromEl || $('msgInput');
+  // 注意：send 会被直接当成 click 回调注册（此时第一个参数是 MouseEvent），
+  // 所以这里必须判断它到底是不是一个输入框，不能简单用 `fromEl || ...`
+  const el = (fromEl && typeof fromEl.value === 'string') ? fromEl : $('msgInput');
+  if (!el) return;
   const text = el.value.trim();
   if (!text) return;
   if (!ws || ws.readyState !== 1) { addSys('聊天还没连上，稍等一下再发'); return; }
@@ -458,7 +493,7 @@ setInterval(() => {
 }, 5000);
 
 /* ---------------- 事件 ---------------- */
-$('sendBtn').addEventListener('click', send);
+$('sendBtn').addEventListener('click', () => send());
 $('msgInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') send(); });
 $('retryBtn').addEventListener('click', () => { if (pc) { try { pc.close(); } catch (_) {} pc = null; } connect(); });
 $('soundBtn').addEventListener('click', () => {

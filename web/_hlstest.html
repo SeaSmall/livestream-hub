@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>HLS 播放诊断</title>
+<style>
+  body{font:13px/1.5 monospace;background:#111;color:#eee;margin:0;padding:10px}
+  pre{white-space:pre-wrap;word-break:break-all}
+  video{width:100%;max-height:38vh;background:#000;display:block;margin-bottom:8px}
+</style>
+</head>
+<body>
+<video id="v" playsinline muted autoplay></video>
+<pre id="out">starting…</pre>
+<script src="/hls.min.js"></script>
+<script>
+'use strict';
+const out = document.getElementById('out');
+const video = document.getElementById('v');
+const q = new URLSearchParams(location.search);
+const PATH = q.get('path') || 'wan';
+const LL = q.get('ll') !== '0';
+
+function report(stage, data) {
+  const line = JSON.stringify(Object.assign({ stage, t: Math.round(performance.now()) }, data || {}));
+  out.textContent += '\n' + line;
+  try {
+    fetch('/api/selftest', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
+      body: JSON.stringify({ stage: 'hls-diag', path: PATH, ll: LL, line })
+    }).catch(() => {});
+  } catch (_) {}
+}
+
+report('env', {
+  page: location.origin + location.pathname,
+  ua: navigator.userAgent.slice(0, 90),
+  hlsSupported: !!(window.Hls && Hls.isSupported()),
+  nativeHls: video.canPlayType('application/vnd.apple.mpegurl') || '(no)',
+  screen: screen.width + 'x' + screen.height
+});
+
+// 复现观众页的真实顺序：先试 WebRTC（给 video.srcObject 挂一个流，然后失败），
+// 再降级到 HLS。
+//   ?mode=plain         直接 HLS
+//   ?mode=webrtc-clear  先挂 srcObject，再按修复逻辑清掉，然后 HLS（修复后）
+//   ?mode=webrtc-keep   先挂 srcObject，故意不清，然后 HLS（对照组=修复前）
+const MODE = q.get('mode') || 'plain';
+(async () => {
+  if (MODE === 'webrtc-clear' || MODE === 'webrtc-keep') {
+    const fake = new MediaStream();
+    video.srcObject = fake;
+    report('sim-webrtc', { srcObjectSet: true, mode: MODE });
+    await new Promise(r => setTimeout(r, 1500));
+    if (MODE === 'webrtc-clear') {
+      try { video.srcObject = null; } catch (_) {}
+      report('srcObject-cleared', { cleared: true });
+    } else {
+      report('srcObject-kept', { cleared: false, note: '对照组：故意不清，模拟修复前' });
+    }
+  }
+  startHls();
+})();
+
+function startHls() {
+if (window.Hls && Hls.isSupported()) {
+  const cfg = {
+    lowLatencyMode: LL,
+    backBufferLength: 15,
+    maxBufferLength: LL ? 6 : 20,
+    liveSyncDurationCount: LL ? 2 : 3,
+    manifestLoadingTimeOut: 12000,
+    manifestLoadingMaxRetry: 4,
+    fragLoadingMaxRetry: 6
+  };
+  report('config', cfg);
+  const hls = new Hls(cfg);
+  window.__hls = hls;
+
+  Object.keys(Hls.Events).forEach((k) => {
+    hls.on(Hls.Events[k], (_, data) => {
+      const d = {};
+      if (data && data.details) d.details = data.details;
+      if (data && data.fatal !== undefined) d.fatal = data.fatal;
+      if (data && data.type) d.type = data.type;
+      if (data && data.stats) {
+        d.stats = { loaded: data.stats.loaded, total: data.stats.total, retry: data.stats.retry };
+      }
+      if (data && data.level !== undefined) d.level = data.level;
+      if (Hls.Events[k] === 'LEVEL_LOADED' && data.details) {
+        d.segments = (data.details.fragments || []).length;
+        d.parts = (data.details.partList || []).length;
+        d.live = data.details.live;
+      }
+      if (Hls.Events[k] === 'ERROR') d.err = (data.error && data.error.message) || '';
+      // 事件很多，只报重要的
+      if (['MEDIA_ATTACHED','MANIFEST_LOADING','MANIFEST_LOADED','MANIFEST_PARSED','LEVEL_LOADING','LEVEL_LOADED',
+           'FRAG_LOADING','FRAG_LOADED','FRAG_BUFFERED','ERROR','BUFFER_STALLED_ERROR','LEVEL_UPDATED'].includes(Hls.Events[k])) {
+        report('hls:' + Hls.Events[k], d);
+      }
+    });
+  });
+
+  ['loadedmetadata','loadeddata','canplay','playing','waiting','stalled','suspend','error','progress','timeupdate','ended'].forEach((ev) => {
+    let n = 0;
+    video.addEventListener(ev, () => {
+      n++;
+      if (ev === 'timeupdate' && n % 25 !== 0) return;
+      report('video:' + ev, {
+        currentTime: +video.currentTime.toFixed(2),
+        duration: isFinite(video.duration) ? +video.duration.toFixed(2) : String(video.duration),
+        readyState: video.readyState,
+        networkState: video.networkState,
+        paused: video.paused,
+        buffered: video.buffered.length ? (+video.buffered.end(video.buffered.length - 1).toFixed(2)) : 0
+      });
+    });
+  });
+
+  hls.on(Hls.Events.MEDIA_ATTACHED, () => {
+    hls.loadSource(`/hls/${PATH}/index.m3u8`);
+    video.play().then(() => report('play-ok', {})).catch((e) => report('play-rejected', { msg: String(e && e.name || e) }));
+  });
+  hls.attachMedia(video);
+
+  setInterval(() => {
+    report('tick', {
+      buffered: video.buffered.length ? +video.buffered.end(video.buffered.length - 1).toFixed(2) : 0,
+      currentTime: +video.currentTime.toFixed(2),
+      readyState: video.readyState,
+      networkState: video.networkState,
+      latency: hls.latency !== undefined ? +hls.latency.toFixed(2) : null,
+      bw: Math.round((hls.bandwidthEstimate || 0) / 1024) + 'kbps',
+      levels: hls.levels ? hls.levels.length : 0,
+      loadLevel: hls.loadLevel
+    });
+  }, 4000);
+
+  setTimeout(() => {
+    report('final', {
+      played: video.currentTime > 1,
+      currentTime: +video.currentTime.toFixed(2),
+      paused: video.paused,
+      readyState: video.readyState,
+      error: hls.mediaError ? String(hls.mediaError) : null
+    });
+  }, 22000);
+} else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+  report('native-mode', {});
+  video.src = `/hls/${PATH}/index.m3u8`;
+  video.addEventListener('loadedmetadata', () => report('native:loadedmetadata', {}));
+  video.addEventListener('error', () => report('native:error', { code: video.error && video.error.code }));
+  video.play().catch((e) => report('native:play-rejected', { msg: String(e && e.name) }));
+  setTimeout(() => report('final', { currentTime: +video.currentTime.toFixed(2) }), 22000);
+} else {
+  report('unsupported', {});
+}
+}
+</script>
+</body>
+</html>

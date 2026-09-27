@@ -186,7 +186,7 @@ function manualWan() {
 }
 
 /* ---------- 进入 ---------- */
-async function join() {
+async function join(takeover) {
   const name = $('nameInput').value.trim();
   if (!name) { showMsg('err', '请输入你的名字'); return; }
   $('joinBtn').disabled = true;
@@ -203,11 +203,25 @@ async function join() {
     const r = await fetch('/api/join', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, via })
+      body: JSON.stringify({ name, via, takeover: takeover === true })
     });
     const j = await r.json();
     if (!j.ok) {
-      showMsg('err', j.error || '进入失败');
+      if (j.canTakeover) {
+        // 名字被占着。多半是用户自己上一次的残留（手机切后台、页面卡住）。
+        // 给一个明确的按钮，而不是把人挡在门外。
+        const m = $('msgBox');
+        m.className = 'msg-box show err';
+        m.innerHTML = esc(j.error) + '<br>';
+        const btn = document.createElement('button');
+        btn.className = 'primary';
+        btn.style.marginTop = '12px';
+        btn.textContent = '这是我本人，顶掉旧连接继续';
+        btn.addEventListener('click', () => join(true));
+        m.appendChild(btn);
+      } else {
+        showMsg('err', esc(j.error || '进入失败'));
+      }
       $('joinBtn').disabled = false;
       $('joinBtn').textContent = '进入直播';
       return;
@@ -215,7 +229,7 @@ async function join() {
     localStorage.setItem(LS_TOKEN, j.token);
     localStorage.setItem(LS_NAME, j.name);
     localStorage.setItem(LS_ROUTE, JSON.stringify({ url: location.origin, kind: j.via, ts: Date.now() }));
-    showMsg('ok', '欢迎，' + j.name + '。正在进入…');
+    showMsg('ok', '欢迎，' + esc(j.name) + '。正在进入…');
     location.href = '/watch';
   } catch (e) {
     showMsg('err', '网络错误：' + e.message);

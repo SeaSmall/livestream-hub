@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>自动登录（测试用）</title></head>
+<body>
+<pre id="o">…</pre>
+<script>
+// 仅供测试：把 token 写进 localStorage 后跳到 /watch，用来跑真实的观众页流程。
+// 生产环境不要用这个页面。
+(async () => {
+  const q = new URLSearchParams(location.search);
+  const name = q.get('name');
+  const via = q.get('via') || 'lan';
+  const o = document.getElementById('o');
+  if (!name) { o.textContent = '缺少 ?name='; return; }
+  const r = await fetch('/api/join', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, via })
+  });
+  const j = await r.json();
+  o.textContent = JSON.stringify(j);
+  if (!j.ok) return;
+  localStorage.setItem('ls_token_v1', j.token);
+  localStorage.setItem('ls_name_v1', j.name);
+  localStorage.setItem('ls_route_v1', JSON.stringify({ url: location.origin, kind: j.via, ts: Date.now() }));
+  location.href = '/watch';
+})();
+</script>
+</body>
+</html>

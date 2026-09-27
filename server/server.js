@@ -397,18 +397,38 @@ const server = http.createServer(async (req, res) => {
   // ---- 加入: 真名校验 ----
   if (p === '/api/join' && req.method === 'POST') {
     const body = await readBody(req);
-    let name = '', declaredVia = '';
-    try { const j = JSON.parse(body); name = (j.name || '').trim(); declaredVia = String(j.via || ''); } catch (_) { /* ignore */ }
+    let name = '', declaredVia = '', takeover = false;
+    try {
+      const j = JSON.parse(body);
+      name = (j.name || '').trim();
+      declaredVia = String(j.via || '');
+      takeover = j.takeover === true;
+    } catch (_) { /* ignore */ }
     if (!name) return json(res, 400, { ok: false, error: '请输入你的名字' });
     if (name.length > 20) return json(res, 400, { ok: false, error: '名字过长' });
     if (!nameAllowed(name)) {
       log(`拒绝进入: "${name}" (${ip}) 不在白名单`);
       return json(res, 403, { ok: false, error: '名字错误：名单里没有这个名字，请填写你的真实姓名' });
     }
-    // 同名唯一: 已经有人以这个名字在线，就不让第二个人再进
+    // 同名唯一
     if (nameInUse(name)) {
-      log(`拒绝进入: "${name}" 已在别处在线`);
-      return json(res, 409, { ok: false, error: '这个名字已经在线了。如果你在别的窗口/设备上开着，请先关掉那边；如果不是你本人，请联系主讲人。' });
+      if (takeover) {
+        // 用户确认"这就是我本人"。顶掉挂着的同名连接再放行。
+        let n = 0;
+        for (const c of wss.clients) {
+          if (c.isHost || !c.session || c.session.name !== name) continue;
+          try { c.send(JSON.stringify({ t: 'kicked', reason: '你在别处重新进入了' })); } catch (_) {}
+          try { c.terminate(); } catch (_) {}
+          n++;
+        }
+        log(`接管: "${name}" 顶掉了 ${n} 个旧连接`);
+      } else {
+        log(`拒绝进入: "${name}" 已在别处在线`);
+        return json(res, 409, {
+          ok: false, canTakeover: true,
+          error: '这个名字已经在线了。如果那就是你自己（比如手机上页面卡住了），点下面的按钮顶掉它继续。'
+        });
+      }
     }
     // 走 TCP 隧道时, 所有外网观众的来源 IP 在服务端看都是 127.0.0.1,
     // 没法用 IP 判断内外网 —— 以入口页自己探测出来的线路为准。
@@ -568,13 +588,32 @@ function pushPresence() {
 
 wss.on('connection', (ws) => {
   const s = ws.session;
+  ws.__alive = true;
+  ws.on('pong', () => { ws.__alive = true; });
 
-  // 同名唯一：两个人抢同一个名字时，后到的直接断开
-  if (!ws.isHost && nameInUse(s.name, ws)) {
-    log(`同名冲突，断开后来的连接: ${s.name}`);
-    try { ws.send(JSON.stringify({ t: 'kicked', reason: '这个名字已经在别处在线了' })); } catch (_) {}
-    setTimeout(() => { try { ws.close(4009, 'name in use'); } catch (_) {} }, 100);
-    return;
+  if (!ws.isHost) {
+    // 同名唯一，但要区分两种情况：
+    //  1) 同一个 token 重连（手机浏览器切后台回来、页面刷新）——这就是同一个人，
+    //     必须顶掉旧连接放行新的，否则用户会被自己上一次的残留连接挡在门外。
+    //  2) token 不同 —— 才是真的第二个人用同一个名字，拒绝。
+    let blockedByOther = false;
+    for (const c of wss.clients) {
+      if (c === ws || c.isHost || !c.session) continue;
+      if (c.session.name !== s.name) continue;
+      if (ws.token && c.token === ws.token) {
+        log(`同一 token 重连，顶掉旧连接: ${s.name}`);
+        try { c.send(JSON.stringify({ t: 'kicked', reason: '你在别处重新打开了页面' })); } catch (_) {}
+        try { c.terminate(); } catch (_) {}
+      } else {
+        blockedByOther = true;
+      }
+    }
+    if (blockedByOther) {
+      log(`同名冲突（不同 token），断开后来的连接: ${s.name}`);
+      try { ws.send(JSON.stringify({ t: 'kicked', reason: '这个名字已经在别处在线了' })); } catch (_) {}
+      setTimeout(() => { try { ws.close(4009, 'name in use'); } catch (_) {} }, 100);
+      return;
+    }
   }
 
   ws.send(JSON.stringify({
@@ -639,6 +678,23 @@ setInterval(() => {
   if (changed) saveSessions();
   broadcast({ t: 'stats', ...statsSnapshot() });
 }, 15000);
+
+// 心跳：浏览器切后台 / 网络断了的时候，TCP 连接可能不会立刻关闭，
+// 旧连接就会一直占着这个名字。靠 ping/pong 把僵尸连接清掉。
+// （浏览器会自动回 pong，不需要客户端写任何代码）
+const HEARTBEAT_MS = 15000;
+setInterval(() => {
+  for (const c of wss.clients) {
+    if (c.readyState !== 1) continue;
+    if (c.__alive === false) {
+      log(`心跳超时，断开僵尸连接: ${(c.session && c.session.name) || '?'}`);
+      try { c.terminate(); } catch (_) {}
+      continue;
+    }
+    c.__alive = false;
+    try { c.ping(); } catch (_) {}
+  }
+}, HEARTBEAT_MS);
 
 // ---------------------------------------------------------------- 启动
 reloadConfig(true);
