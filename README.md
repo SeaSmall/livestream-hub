@@ -361,6 +361,28 @@ MediaMTX 会给 HLS 下发一个带 `Secure` 的会话 cookie——纯 HTTP 下�
 </details>
 
 <details>
+<summary><b>手机加载不进直播流（桌面能看，手机一直"正在连接…"）</b></summary>
+
+**v1.0.5 的 bug，升级到 v1.0.6。**
+
+v1.0.5 为了让"踢出能断画面"加了一道会话校验，观众页在拉流**之前**要先 `await` 一次
+`/api/me`。问题出在这个请求**没有超时**：走 TCP 隧道时移动网络很容易出现半开连接，
+请求就一直挂着不返回 —— 于是"拉流"和"连聊天"这两步排在它后面，**一个都没执行**，
+页面永远停在"正在连接…"。桌面网络好，所以看不出来。
+
+v1.0.6 的改法：
+
+- **先拉流、先连聊天**，会话校正在后台跑，绝不挡在取流前面
+- 那次请求加了 4 秒超时，超时就当没这回事（媒体凭据本来就有 `?token=` 兜底）
+- 顺手修了另一处：外网观众以前会**先试 WebRTC**（`detectRoute` 永远把线路记成"当前这条"，
+  所以"是不是直连"判断失效了）。隧道上 WebRTC 必然失败，白白多等十几秒。
+  现在按 `route.kind` 判断，外网观众直接走 HLS 720p
+
+判断依据：手机上按 F12（或用桌面浏览器模拟手机）看 Network，
+如果**一个 `/hls/` 或 `/whep/` 请求都没有**，就是这个原因。
+</details>
+
+<details>
 <summary><b>画面一直"缓冲中"，但状态显示已连接</b></summary>
 
 如果你用的是较老的版本，这是 `video.srcObject` 没有清理导致的：
@@ -449,9 +471,18 @@ Invoke-RestMethod http://127.0.0.1:7000/api/stats
 # 自测门禁 + 聊天（12 项）
 cd server; node ..\tools\test-chat.js
 
-# 自测管理功能：禁言 / 踢人（22 项）
+# 自测管理功能：禁言 / 踢人（38 项）
 # ⚠ 会真的用名单里的名字进入并踢人，别在有人看的时候跑
 cd server; node ..\tools\test-mod.js
+
+# 手机端复现 + 诊断（Edge 无头浏览器 + 移动端模拟：UA / 触摸 / 视口）
+#   第 2 个参数是白名单里的名字；会真的进场一次，完事记得把测试名字从名单里删掉
+node ..\tools\test-mobile.js http://127.0.0.1:7000 测试名字
+# 想看"隧道慢/API 挂住"时页面会不会卡死（把 /api/me 拖 6 秒）：
+#   PowerShell: $env:SLOW_ME='6000'; node ..\tools\test-mobile.js http://你的公网入口 测试名字
+
+# HLS 取流链路逐级体检（主列表 -> 变体 -> 分片，打印每一步状态码）
+node ..\tools\test-hls-chain.js http://127.0.0.1:7000 测试名字 wan
 
 # 页面里按 F12 看控制台
 #   WebRTC 自测页: http://127.0.0.1:7000/_selftest-whep.html?path=live
@@ -491,7 +522,9 @@ livestream-hub/
 └── tools/
     ├── make-icon.ps1          重新生成图标
     ├── test-chat.js           门禁 + 聊天自测
-    └── test-mod.js            禁言 / 踢人自测
+    ├── test-mod.js            禁言 / 踢人自测
+    ├── test-mobile.js         手机端复现 + 诊断（无头浏览器 + 移动端模拟）
+    └── test-hls-chain.js      HLS 取流链路逐级体检
 ```
 
 安装后还会多出（已在 `.gitignore` 里）：

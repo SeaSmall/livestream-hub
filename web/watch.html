@@ -79,7 +79,10 @@ const myName = localStorage.getItem('ls_name_v1') || '';
 if (!token) location.href = '/';
 
 const route = JSON.parse(localStorage.getItem(LS_ROUTE) || 'null') || { kind: 'wan', url: location.origin };
-const onLan = location.origin === route.url;
+// 注意：detectRoute 永远把 route.url 记成"当前这一条线"，所以只比 url 的话
+// 走隧道的观众也会被判成直连，于是先试 WebRTC（隧道上必然失败、白白等十几秒）。
+// 真正的判据是 route.kind —— 只有探测到校园网内网地址才会是 'lan'。
+const onLan = route.kind === 'lan' && location.origin === route.url;
 
 const PATHS = { lan: 'live', wan: 'wan' };
 let hls = null, pc = null, ws = null, currentMode = '', chatStopped = false, kickedByMod = false;
@@ -88,27 +91,32 @@ let hls = null, pc = null, ws = null, currentMode = '', chatStopped = false, kic
 // 凭证只能走 cookie 或查询串 —— 两个都用上，哪个通都行。
 const MEDIA_QS = '?token=' + encodeURIComponent(token);
 
-// 进页面先跟服务端对一次会话，顺便让它在**当前域名**下种一次媒体 cookie。
+// 进页面跟服务端对一次会话，顺便让它在**当前域名**下种一次媒体 cookie。
 // （切换线路时隧道域名和直连域名不是一个域，cookie 不会自己跟过去）
+//
+// ⚠ 这里**绝对不能挡住拉流**：走 TCP 隧道时请求可能一直挂着不返回（半开连接），
+//    之前就是因为 await 了它、又没超时，手机端卡在"正在连接…"，一个取流请求都发不出去。
+//    所以：带超时、失败也继续、只在明确 401/403 时才判定会话无效。
 async function syncCookie() {
+  const ctrl = new AbortController();
+  const to = setTimeout(() => ctrl.abort(), 4000);
   try {
-    const r = await fetch('/api/me?token=' + encodeURIComponent(token), { cache: 'no-store' });
+    const r = await fetch('/api/me?token=' + encodeURIComponent(token), { cache: 'no-store', signal: ctrl.signal });
     if (r.status === 401 || r.status === 403) {
       let why = '';
       try { why = (await r.json()).error || ''; } catch (_) {}
       localStorage.removeItem(LS_TOKEN);
       if (/移出/.test(why)) { localStorage.setItem('ls_kicked_hint', why); }
       location.replace('/');
-      return false;
+      return 'invalid';
     }
     if (document.cookie.indexOf('ls_t=') < 0) {
-      // cookie 被浏览器拦了。查询串还能兜住 HLS（MediaMTX 会把查询串带进分片地址）
       reportFail('cookie-missing', '媒体 cookie 没种上，改用 URL 凭据');
     }
-    return true;
+    return 'ok';
   } catch (_) {
-    return true;   // 网络抖一下就当没事，后面的播放链路自己会重试
-  }
+    return 'skipped';   // 超时/网络抖：照常拉流，URL 上的 token 也能过鉴权
+  } finally { clearTimeout(to); }
 }
 
 /* ---------------- 状态显示 ---------------- */
@@ -610,13 +618,16 @@ $('soundBtn').addEventListener('click', () => {
 video.addEventListener('playing', () => setStatus('ok', '播放中'));
 video.addEventListener('waiting', () => setStatus('', '缓冲中…'));
 
-(async () => {
-  // 先确认会话、种好媒体 cookie，再开始拉流 —— 否则第一次媒体请求可能没凭据
-  const ok = await syncCookie();
-  if (ok === false) return;     // 会话无效/已被移出，正在跳回入口页
-  connect();
-  connectChat();
-})();
+// 启动顺序：**先拉流、先连聊天**，会话校正放后台跑。
+// 早先写成 await syncCookie() 再 connect()，结果手机上那个 /api/me 一挂住，
+// 取流请求一个都发不出去 —— 页面永远"正在连接…"。教训：别把取流挡在任何网络往返后面。
+reportFail('boot', 'watch 页已加载 mode=' + (onLan ? 'lan' : 'wan') + ' ua=' + navigator.userAgent.slice(0, 60));
+connect();
+connectChat();
+syncCookie().then((st) => {
+  if (st === 'invalid') return;        // 会话真的无效，正在跳回入口页
+  reportFail('boot-cookie', 'syncCookie=' + st + ' cookie=' + (document.cookie.indexOf('ls_t=') >= 0 ? 'yes' : 'no'));
+});
 </script>
 </body>
 </html>
